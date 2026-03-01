@@ -1,0 +1,4 @@
+# ninja log v5
+1	11514	1745827622697918401	/home/qiwei/program/Omni-Scene/simple-knn/build/temp.linux-x86_64-3.10/simple_knn.o	3a249e3403ba47d5
+1	16850	1745827628041976271	/home/qiwei/program/Omni-Scene/simple-knn/build/temp.linux-x86_64-3.10/ext.o	b3f01e92354f9ca3
+2	46512	1745827657694292045	/home/qiwei/program/Omni-Scene/simple-knn/build/temp.linux-x86_64-3.10/spatial.o	470bf248a8474c2a

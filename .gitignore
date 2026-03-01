@@ -1,0 +1,13 @@
+*output*
+**/__pycache__
+**/.DS_Store
+*workdirs*
+**/.cache
+checkpoint-100000
+*.png
+*.jpg
+*.exr
+*.xml
+*.ply
+checkpoints/
+model/DepthAnythingV2/*
