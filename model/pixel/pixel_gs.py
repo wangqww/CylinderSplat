@@ -121,6 +121,7 @@ class PixelGaussian(BaseModule):
                  patchs_width=1,
                  gh_cnn_layers=3,
                  gaussians_per_pixel=3,
+                 num_frames=2,
                  **kwargs,
                  ):
 
@@ -213,7 +214,7 @@ class PixelGaussian(BaseModule):
                 num_head_channels=32,
                 dims=2,
                 postnorm=True,
-                num_frames=2,
+                num_frames=num_frames,
                 use_cross_view_self_attn=True,
             ),
             nn.Conv2d(channels, channels, 3, 1, 1)
@@ -372,6 +373,15 @@ class PixelGaussian(BaseModule):
                     c**0.5
                 )  # [vB, D, H, W]
                 raw_correlation_in_lists.append(raw_correlation_in)
+            
+            if len(raw_correlation_in_lists) == 0:
+                raw_correlation_in = (feat01.unsqueeze(2) * feat01.unsqueeze(2)).sum(
+                    1
+                ) / (
+                    c**0.5
+                )  # [vB, D, H, W]
+                raw_correlation_in_lists.append(raw_correlation_in)
+
             # average all cost volumes
             raw_correlation_in = torch.mean(
                 torch.stack(raw_correlation_in_lists, dim=0), dim=0, keepdim=False

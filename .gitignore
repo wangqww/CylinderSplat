@@ -1,13 +1,29 @@
-*output*
-**/__pycache__
+# =========================
+# Python cache and temp files
+# =========================
+**/__pycache__/
+**/.cache/
+
+# =========================
+# OS-specific files
+# =========================
 **/.DS_Store
-*workdirs*
-**/.cache
+
+# =========================
+# Generated outputs and experiment artifacts
+# =========================
+output/
+outputs/
+workdirs/
 checkpoint-100000
+
+# Model checkpoints and large generated assets
+*.ckpt
 *.png
 *.jpg
 *.exr
 *.xml
 *.ply
-checkpoints/
-model/DepthAnythingV2/*
+
+# Third-party/model local weights
+model/DepthAnythingV2/

@@ -573,12 +573,12 @@ class OmniGaussianCylinderAll(BaseModule):
         #     set_loss("depth_abs_pixel", split, depth_abs_loss, self.loss_args.weight_depth_abs_vol)
 
         # Depth loss for volume-gs
-        # if self.loss_args.weight_depth_abs_vol > 0:
-        #     depth_abs_loss_vol = torch.abs(render_pkg_volume["depth"] - depth_m_gt)
-        #     depth_abs_loss_vol = depth_abs_loss_vol * conf_m_gt
-        #     depth_abs_loss_vol = depth_abs_loss_vol.mean()
-        #     loss = loss + self.loss_args.weight_depth_abs_vol * depth_abs_loss_vol
-        #     set_loss("depth_abs_vol", split, depth_abs_loss_vol, self.loss_args.weight_depth_abs_vol)        
+        if self.loss_args.weight_depth_abs_vol > 0:
+            depth_abs_loss_vol = torch.abs(render_pkg_volume["depth"] - depth_m_gt)
+            depth_abs_loss_vol = depth_abs_loss_vol * conf_m_gt
+            depth_abs_loss_vol = depth_abs_loss_vol.mean()
+            loss = loss + self.loss_args.weight_depth_abs_vol * depth_abs_loss_vol
+            set_loss("depth_abs_vol", split, depth_abs_loss_vol, self.loss_args.weight_depth_abs_vol)        
         
         # ====================Volume loss ===================== #
         if self.loss_args.weight_volume_loss > 0:
