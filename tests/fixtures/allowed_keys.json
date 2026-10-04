@@ -1,0 +1,53 @@
+{
+  "_comment": "Frozen resume-rule lists (plan A1, header dry-run of the real checkpoints 2026-09-30). configs/entries.py TRANSFERS must equal this. 'prefix.*' = every name starting with 'prefix.'. stage1_to_stage2 / double_pixel_to_single_pixel: the pixel_gs.mono_depth.* names are 333 tensors. d7_visibility_softmax.allowed_missing = the seven volume_gs.gs_decoder.gaussian_to_color_vis.* parameters of the implemented module (frozen 2026-09-30, kept equal to configs/entries.py).",
+  "transfers": {
+    "exact": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "stage1_to_stage2": {
+      "allowed_missing": [],
+      "allowed_extra": [
+        "pixel_gs.mono_depth.*"
+      ]
+    },
+    "double_pixel_to_single_pixel": {
+      "allowed_missing": [],
+      "allowed_extra": [
+        "pixel_gs.mono_depth.*"
+      ]
+    },
+    "stage2_to_stage3": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "stage3_to_stage4_512": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "mp3d_all_256_to_loc360_pan2": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "d3_single_view": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "pan2_single_view": {
+      "allowed_missing": [],
+      "allowed_extra": []
+    },
+    "d7_visibility_softmax": {
+      "allowed_missing": [
+        "volume_gs.gs_decoder.gaussian_to_color_vis.encoder.0.weight",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.encoder.0.bias",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.head.0.weight",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.head.0.bias",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.head.2.weight",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.head.2.bias",
+        "volume_gs.gs_decoder.gaussian_to_color_vis.log_beta"
+      ],
+      "allowed_extra": []
+    }
+  }
+}
