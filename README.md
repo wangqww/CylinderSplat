@@ -306,8 +306,7 @@ python evaluate.py --dataset mp3d_double_256      --py-config $O/omni_gs_160x320
 | `loc360_double_256` | the same, PCC against the UniK3D prior |
 | `vigor_double` | Kansas City |
 
-**Protocol.** All frames of a sequence are targets, including the input views; each sample is the mean over its
-targets and each scene the mean over its samples. `--novel-only` scores only the views that are not inputs. The
+**Protocol.** Each sample is the mean over its targets and each scene the mean over its samples. `--novel-only` scores only the views that are not inputs. The
 360Loc rows follow PanSplat: 500 samples, inputs three frames (about 1.4 m) apart, totals only.
 
 **Metrics.** `wspsnr` is the PSNR of the paper (latitude-weighted WS-PSNR); `psnr` is plain PSNR of clipped images;
