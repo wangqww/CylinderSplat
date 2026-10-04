@@ -1,3 +1,5 @@
+"""Abstract base class for the image backbones."""
+
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar
 
@@ -9,7 +11,6 @@ T = TypeVar("T")
 
 
 class Backbone(nn.Module, ABC, Generic[T]):
-
     def __init__(self) -> None:
         super().__init__()
 

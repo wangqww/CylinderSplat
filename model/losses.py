@@ -4,10 +4,26 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from collections import namedtuple
-# from torchmetrics import PearsonCorrCoef
 
-from taming.util import get_ckpt_path
 import math
+import os
+
+# The LPIPS weights ship with the repo; resolve them from the repo root, not the cwd
+# (runs chdir into a scratch dir so that debug images never land in the repo).
+_LPIPS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "taming/modules/autoencoder/lpips"
+)
+_LPIPS_FILES = {"vgg_lpips": "vgg.pth"}
+
+
+def get_ckpt_path(name, root=_LPIPS_DIR):
+    """Path of the shipped LPIPS weights (replaces taming.util.get_ckpt_path, which returned
+    the same path when the file exists and otherwise downloaded it)."""
+    path = os.path.join(root, _LPIPS_FILES[name])
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"LPIPS weights not found: {path} (they ship with the repo under taming/)")
+    return path
+
 
 class LossDepthTV(nn.Module):
     def __init__(self, use_second_derivative=False, sigma_image=False, near=0.1, far=1000.0):
@@ -16,7 +32,7 @@ class LossDepthTV(nn.Module):
         self.sigma_image = sigma_image
         self.near = near
         self.far = far
-    
+
     def forward(self, prediction):
         # Scale the depth between the near and far planes.
         near = math.log(self.near)
@@ -35,6 +51,7 @@ class LossDepthTV(nn.Module):
 
         return depth_dx.abs().mean() + depth_dy.abs().mean()
 
+
 class LPIPS(nn.Module):
     # Learned perceptual metric
     def __init__(self, use_dropout=True):
@@ -52,8 +69,7 @@ class LPIPS(nn.Module):
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "taming/modules/autoencoder/lpips")
-        #ckpt = ".cache/vgg.pth"
+        ckpt = get_ckpt_path(name, _LPIPS_DIR)
         self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         print("loaded pretrained LPIPS loss from {}".format(ckpt))
 
@@ -85,19 +101,28 @@ class LPIPS(nn.Module):
 class ScalingLayer(nn.Module):
     def __init__(self):
         super(ScalingLayer, self).__init__()
-        self.register_buffer('shift', torch.Tensor([-.030, -.088, -.188])[None, :, None, None])
-        self.register_buffer('scale', torch.Tensor([.458, .448, .450])[None, :, None, None])
+        self.register_buffer("shift", torch.Tensor([-0.030, -0.088, -0.188])[None, :, None, None])
+        self.register_buffer("scale", torch.Tensor([0.458, 0.448, 0.450])[None, :, None, None])
 
     def forward(self, inp):
         return (inp - self.shift) / self.scale
 
 
 class NetLinLayer(nn.Module):
-    """ A single linear layer which does a 1x1 conv """
+    """A single linear layer which does a 1x1 conv"""
+
     def __init__(self, chn_in, chn_out=1, use_dropout=False):
         super(NetLinLayer, self).__init__()
-        layers = [nn.Dropout(), ] if (use_dropout) else []
-        layers += [nn.Conv2d(chn_in, chn_out, 1, stride=1, padding=0, bias=False), ]
+        layers = (
+            [
+                nn.Dropout(),
+            ]
+            if (use_dropout)
+            else []
+        )
+        layers += [
+            nn.Conv2d(chn_in, chn_out, 1, stride=1, padding=0, bias=False),
+        ]
         self.model = nn.Sequential(*layers)
 
 
@@ -136,23 +161,22 @@ class vgg16(torch.nn.Module):
         h_relu4_3 = h
         h = self.slice5(h)
         h_relu5_3 = h
-        vgg_outputs = namedtuple("VggOutputs", ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3', 'relu5_3'])
+        vgg_outputs = namedtuple("VggOutputs", ["relu1_2", "relu2_2", "relu3_3", "relu4_3", "relu5_3"])
         out = vgg_outputs(h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3, h_relu5_3)
         return out
 
 
-def normalize_tensor(x,eps=1e-10):
-    norm_factor = torch.sqrt(torch.sum(x**2,dim=1,keepdim=True))
-    return x/(norm_factor+eps)
+def normalize_tensor(x, eps=1e-10):
+    norm_factor = torch.sqrt(torch.sum(x**2, dim=1, keepdim=True))
+    return x / (norm_factor + eps)
 
 
 def spatial_average(x, keepdim=True):
-    return x.mean([2,3],keepdim=keepdim)
+    return x.mean([2, 3], keepdim=keepdim)
 
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class DummyLoss(nn.Module):

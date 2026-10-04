@@ -1,3 +1,5 @@
+"""Wall-clock timing of named code sections."""
+
 import json
 from collections import defaultdict
 from contextlib import contextmanager

@@ -15,7 +15,8 @@
 output/
 outputs/
 workdirs/
-checkpoint-100000
+checkpoints/
+hf_data/
 
 # Model checkpoints and large generated assets
 *.ckpt
@@ -25,5 +26,14 @@ checkpoint-100000
 *.xml
 *.ply
 
-# Third-party/model local weights
-model/DepthAnythingV2/
+# =========================
+# Build artefacts (CUDA extensions are built locally, never committed)
+# =========================
+**/build/
+**/*.egg-info/
+*.so
+*.o
+._*
+
+# Run outputs (training/evaluation write under a run directory outside the repo)
+runs/

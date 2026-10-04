@@ -1,3 +1,5 @@
+"""Camera, ray and equirectangular (ERP) panorama geometry helpers for the pixel branch."""
+
 from math import prod
 
 import torch
@@ -7,6 +9,7 @@ from torch import Tensor
 import numpy as np
 
 import torch.nn.functional as F
+
 
 def homogenize_points(
     points: Float[Tensor, "*batch dim"],
@@ -81,11 +84,14 @@ def unproject_erp(
 
     # Apply the inverse intrinsics to the coordinates.
     phi_theta = coordinates * coordinates.new_tensor([2 * np.pi, np.pi]) - coordinates.new_tensor([np.pi, np.pi / 2])
-    ray_directions = torch.stack([
-        torch.cos(phi_theta[..., 1]) * torch.sin(phi_theta[..., 0]),
-        torch.sin(phi_theta[..., 1]),
-        torch.cos(phi_theta[..., 1]) * torch.cos(phi_theta[..., 0]),
-    ], dim=-1)
+    ray_directions = torch.stack(
+        [
+            torch.cos(phi_theta[..., 1]) * torch.sin(phi_theta[..., 0]),
+            torch.sin(phi_theta[..., 1]),
+            torch.cos(phi_theta[..., 1]) * torch.cos(phi_theta[..., 0]),
+        ],
+        dim=-1,
+    )
 
     # Apply the supplied depth values.
     return ray_directions * z[..., None]
@@ -100,9 +106,7 @@ def unproject_pers(
 
     # Apply the inverse intrinsics to the coordinates.
     coordinates = homogenize_points(coordinates)
-    ray_directions = einsum(
-        intrinsics.float().inverse().type_as(coordinates), coordinates, "... i j, ... j -> ... i"
-    )
+    ray_directions = einsum(intrinsics.float().inverse().type_as(coordinates), coordinates, "... i j, ... j -> ... i")
 
     # Apply the supplied depth values.
     return ray_directions * z[..., None]
@@ -111,16 +115,18 @@ def unproject_pers(
 def get_world_rays_erp(
     coordinates: Float[Tensor, "*#batch dim"],
     extrinsics: Float[Tensor, "*#batch dim+2 dim+2"] | None = None,
-) -> tuple[
-    Float[Tensor, "*batch dim+1"],  # origins
-    Float[Tensor, "*batch dim+1"],  # directions
-] | Float[Tensor, "*batch dim+1"]:
+) -> (
+    tuple[
+        Float[Tensor, "*batch dim+1"],  # origins
+        Float[Tensor, "*batch dim+1"],  # directions
+    ]
+    | Float[Tensor, "*batch dim+1"]
+):
     # Get camera-space ray directions.
     directions = unproject_erp(
         coordinates,
         torch.ones_like(coordinates[..., 0]),
     )
-    # directions = directions / directions.norm(dim=-1, keepdim=True)
 
     directions = homogenize_vectors(directions)
 
@@ -294,9 +300,10 @@ def get_fov(intrinsics: Float[Tensor, "batch 3 3"]) -> Float[Tensor, "batch 2"]:
     fov_y = (top * bottom).sum(dim=-1).acos()
     return torch.stack((fov_x, fov_y), dim=-1)
 
+
 # The fibonacci_sphere function is from from https://stackoverflow.com/questions/9600801/evenly-distributing-n-points-on-a-sphere
 def fibonacci_sphere(samples=1000):
-    phi = np.pi * (3. - np.sqrt(5.))  # golden angle in radians
+    phi = np.pi * (3.0 - np.sqrt(5.0))  # golden angle in radians
     y = torch.linspace(1, -1, samples)
     radius = np.sqrt(1 - y**2)
     theta = phi * torch.arange(samples)
@@ -318,28 +325,37 @@ def fibonacci_sphere_grid(c, device=None):
 
     return torch.stack((lon, lat), dim=1)
 
+
 def pad_pano(pano, padding):
     if padding <= 0:
         return pano
 
     if pano.ndim == 5:
         b, m = pano.shape[:2]
-        pano_pad = rearrange(pano, 'b m c h w -> (b m c) h w')
+        pano_pad = rearrange(pano, "b m c h w -> (b m c) h w")
     elif pano.ndim == 4:
         b = pano.shape[0]
-        pano_pad = rearrange(pano, 'b c h w -> (b c) h w')
+        pano_pad = rearrange(pano, "b c h w -> (b c) h w")
     else:
-        raise NotImplementedError('pano should be 4 or 5 dim')
+        raise NotImplementedError("pano should be 4 or 5 dim")
 
-    pano_pad = F.pad(pano_pad, [padding, ] * 2, mode='circular')
-    pano_pad = F.pad(pano_pad, [0, 0, padding, padding], mode='constant')
+    pano_pad = F.pad(
+        pano_pad,
+        [
+            padding,
+        ]
+        * 2,
+        mode="circular",
+    )
+    pano_pad = F.pad(pano_pad, [0, 0, padding, padding], mode="constant")
 
     if pano.ndim == 5:
-        pano_pad = rearrange(pano_pad, '(b m c) h w -> b m c h w', b=b, m=m)
+        pano_pad = rearrange(pano_pad, "(b m c) h w -> b m c h w", b=b, m=m)
     elif pano.ndim == 4:
-        pano_pad = rearrange(pano_pad, '(b c) h w -> b c h w', b=b)
+        pano_pad = rearrange(pano_pad, "(b c) h w -> b c h w", b=b)
 
     return pano_pad
+
 
 def unpad_pano(pano_pad, padding):
     if padding <= 0:

@@ -1,35 +1,44 @@
-tyro
-einops
-accelerate
-gradio
-imageio
-imageio-ffmpeg
-moviepy==1.0.3
-wandb
-lpips
-matplotlib
-packaging
-Pillow
-pygltflib
-rembg[gpu,cli]
-rich
-safetensors
-scikit-image
-scikit-learn
-scipy
-tqdm
-trimesh
-kiui >= 0.2.3
-xatlas
-roma
-plyfile
-ftfy==6.2.0
+# Runtime dependencies of CylinderSplat, pinned to the environment that produced
+# the released results (conda env "omniscene", Python 3.10, CUDA 11.8).
+#
+# Install order (see README "Installation"). Steps 2, 3 and 5 compile against the
+# installed torch, so they need --no-build-isolation (with uv: uv pip install --no-build-isolation ...):
+#   0. build tools (torch 2.1's cpp_extension needs pkg_resources.packaging, gone in setuptools 70):
+#        pip install "setuptools<70" wheel ninja
+#   1. PyTorch 2.1.0 + CUDA 11.8:
+#        pip install torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
+#   2. mmcv 2.1.0 with CUDA ops, built from source
+#        (git checkout v2.1.0; MMCV_WITH_OPS=1 FORCE_CUDA=1 pip install --no-build-isolation -e .)
+#   3. pytorch3d 0.7.8, built from source
+#        (pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8")
+#   4. this file:  pip install -r requirements.txt
+#   5. the local CUDA extensions:  pip install --no-build-isolation ./pano_gaussian ./simple-knn
+#      (pano_gaussian needs the glm submodule: git submodule update --init --recursive)
+#
+# taming-transformers is not needed: model/losses.py reads the LPIPS weights shipped
+# under taming/modules/autoencoder/lpips/ itself.
+
+accelerate==1.5.2
+einops==0.8.1
+imageio==2.37.0
 jaxtyping==0.2.31
+lpips==0.1.4
+matplotlib==3.5.3
+mmengine==0.10.7
+mmdet==3.3.0
+mmdet3d==1.4.0
+numpy==1.26.4
 omegaconf==2.3.0
-opencv_python==4.10.0.84
-opencv_python_headless==4.10.0.84
-peft==0.11.1
-transformers==4.28.1
+opencv-python-headless==4.10.0.84
+pillow==11.0.0
+plyfile==1.1
+safetensors==0.5.3
+scikit-image==0.25.2
+scipy==1.15.2
 typeguard==2.13.3
-taming-transformers
-timm==0.4.12
+xformers==0.0.22.post7
+
+# Optional
+#   pytest==8.3.5           tests/
+# UniK3D (tools/prepare_unik3d_depth.py) needs Python>=3.11 and torch>=2.4, so it gets its
+# own environment (README "Depth prior"). Do not install it into this one.

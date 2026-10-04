@@ -53,7 +53,7 @@ dataset_params = dict(
     batch_size_train=2,
     batch_size_val=1,
     batch_size_test=4,
-    num_workers=32,
+    num_workers=1,  # what the 360Loc loader uses (configs/entries.py, table T)
     num_workers_val=32,
     num_workers_test=32
 )

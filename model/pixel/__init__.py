@@ -1,8 +1,7 @@
-#from .autoencoder import GaussianAutoencoderKL
-from .blocks import MVDownsample2D, MVUpsample2D, MVMiddle2D
+"""Pixel-branch Gaussian heads; importing the package registers them in the MODELS registry."""
+
 from .pixel_gs import PixelGaussian
-from .pixel_gs_original import PixelGaussianOri
 from .pixel_gs_360loc import PixelGaussian360Loc
 from .pixel_gs_512 import PixelGaussian512
 
-__all__ = ['MVDownsample2D', 'MVUpsample2D', 'MVMiddle2D', 'PixelGaussian', "PixelGaussianOri", "PixelGaussian360Loc", "PixelGaussian512"]
+__all__ = ["PixelGaussian", "PixelGaussian360Loc", "PixelGaussian512"]

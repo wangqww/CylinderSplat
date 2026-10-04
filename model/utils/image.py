@@ -1,7 +1,10 @@
+"""Image resizing helpers."""
+
 import numpy as np
 import cv2
 
 import torch.nn.functional as F
+
 
 def HWC3(x):
     assert x.dtype == np.uint8
@@ -35,14 +38,12 @@ def resize_image(input_image, resolution):
     return img
 
 
-def maybe_resize(tensor, tgt_reso, interp_mode="bilinear"): # "nearest" or "bilinear"
+def maybe_resize(tensor, tgt_reso, interp_mode="bilinear"):  # "nearest" or "bilinear"
     if type(tgt_reso) == type([]):
-        tensor = F.interpolate(
-            tensor, size=tgt_reso, mode=interp_mode, antialias=interp_mode=="bilinear"
-        )
+        tensor = F.interpolate(tensor, size=tgt_reso, mode=interp_mode, antialias=interp_mode == "bilinear")
     else:
         if tensor.shape[-1] != tgt_reso:
             tensor = F.interpolate(
-                tensor, size=(tgt_reso, tgt_reso), mode=interp_mode, antialias=interp_mode=="bilinear"
+                tensor, size=(tgt_reso, tgt_reso), mode=interp_mode, antialias=interp_mode == "bilinear"
             )
     return tensor
