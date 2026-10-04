@@ -213,6 +213,7 @@ class OmniGaussianSphericalVolume(BaseModule):
                 data_dict["pluckers"],
                 data_dict["rays_o"],
                 data_dict["rays_d"],
+                data_dict["c2ws"],
             )
 
             gaussians_pixel = gaussians["gaussians"]
@@ -433,6 +434,7 @@ class OmniGaussianSphericalVolume(BaseModule):
             data_dict["pluckers"],
             data_dict["rays_o"],
             data_dict["rays_d"],
+            data_dict["c2ws"],
             status="test",
         )
 

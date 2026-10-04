@@ -182,6 +182,7 @@ class OmniGaussianCylinderPixelDepthanywhere(BaseModule):
             data_dict["pluckers"],
             data_dict["rays_o"],
             data_dict["rays_d"],
+            data_dict["c2ws"],
         )
 
         gaussians_all = gaussians["gaussians"]
@@ -329,6 +330,7 @@ class OmniGaussianCylinderPixelDepthanywhere(BaseModule):
                 data_dict["pluckers"],
                 data_dict["rays_o"],
                 data_dict["rays_d"],
+                data_dict["c2ws"],
                 status="test",
             )
 
