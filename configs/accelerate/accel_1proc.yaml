@@ -1,4 +1,4 @@
-# One process, one GPU: rows mp3d_double_512, mp3d_double_160, kansas_double_160.
+# One process, one GPU: rows mp3d_double_512, kansas_double_160.
 # GPUs 1-3 only (GPU0 only if idle at launch); choose another with `accelerate launch --gpu_ids 2 ...`.
 compute_environment: LOCAL_MACHINE
 debug: false

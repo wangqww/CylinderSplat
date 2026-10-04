@@ -127,7 +127,7 @@ evaluation. Set `backbone_ckpt='/path/to/pansplat_last.ckpt'` in `model = dict(.
 
    | loader | constant | default |
    |---|---|---|
-   | `data/mp3d_dataloader_{double_256,single_256,double_512,double}.py` | module-level `roots` | `/data/qiwei/nips25/pano_grf` |
+   | `data/mp3d_dataloader_{double_256,single_256,double_512}.py` | module-level `roots` | `/data/qiwei/nips25/pano_grf` |
    | `data/loc360_dataloader_double_all_512.py` | `root` in `Dataset360Loc.__init__` | `/data/qiwei/nips25/360Loc` |
    | `data/vigor_dataloader_double.py` (Kansas City) | `root_dir` in `load_VIGOR_data` and in the `kansas_double_160` row of `configs/entries.py` | `/data/qiwei/nips25/` |
 
@@ -194,7 +194,6 @@ scheduler, the forward call, validation and the number of processes (a launch wi
 | `mp3d_single_256` | MP3D single view, 256×512 | 3 | `omni_gs_160x320_mp3d_cylinder_{pixel,all}_256_single.py` |
 | `loc360_all_256` | 360Loc, 256×512 | 3 | `omni_gs_160x320_360Loc_cylinder_all_256.py`, `release/loc360_finetune_256.py` |
 | `mp3d_double_512` | MP3D two-view, 512×1024, the `all_512` architecture | 1 | `omni_gs_160x320_mp3d_cylinder_{pixel,all}_512.py` |
-| `mp3d_double_160` | MP3D two-view, 160×320 (ablations) | 1 | the other `omni_gs_160x320_mp3d_*.py` configs |
 | `kansas_double_160` | Kansas City, 160×320 | 1 | `omni_gs_160x320_VIGOR_cylinder_*.py` |
 
 Launch with the matching config in [`configs/accelerate/`](configs/accelerate) (`accel_3proc.yaml` or
@@ -267,19 +266,17 @@ $L3 --entry mp3d_single_256 --py-config configs/OmniScene/omni_gs_160x320_mp3d_c
     --run-id single --resume-from $RUNS/s1/checkpoint-24000 --transfer double_pixel_to_single_pixel
 ```
 
-### Ablations and Kansas City
+### Kansas City
 
-The 160×320 rows train the ablation models (UniFuse / Depth Anywhere depth priors, Cartesian and spherical
-triplanes, the density and cluster variants) and the Kansas City models on one process:
+The Kansas City models (paper App. F) train at 160×320 on one process:
 
 ```bash
-L1="accelerate launch --config-file configs/accelerate/accel_1proc.yaml train.py"
-$L1 --entry mp3d_double_160   --py-config configs/OmniScene/omni_gs_160x320_mp3d_decare_volume.py --run-id decare
-$L1 --entry kansas_double_160 --py-config configs/OmniScene/omni_gs_160x320_VIGOR_cylinder_all.py  --run-id kansas
+accelerate launch --config-file configs/accelerate/accel_1proc.yaml train.py \
+    --entry kansas_double_160 --py-config configs/OmniScene/omni_gs_160x320_VIGOR_cylinder_all.py --run-id kansas
 ```
 
-The UniFuse and Depth Anywhere models read their depth networks from `checkpoints/` relative to the working
-directory.
+`omni_gs_160x320_VIGOR_cylinder_pixel_unifuse.py` (the pixel model with a UniFuse depth prior) reads its depth
+network from `checkpoints/` relative to the working directory.
 
 ---
 

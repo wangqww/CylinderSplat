@@ -6,7 +6,7 @@
         --run-id all256 --resume-from <volume_256>/checkpoint-36000 --transfer stage2_to_stage3
 
     accelerate launch --config-file configs/accelerate/accel_1proc.yaml train.py \
-        --entry mp3d_double_160 --py-config configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all.py --run-id all160
+        --entry kansas_double_160 --py-config configs/OmniScene/omni_gs_160x320_VIGOR_cylinder_all.py --run-id kansas
 
     accelerate launch --config-file configs/accelerate/accel_3proc.yaml train.py \
         --entry mp3d_double_512_ddp3 --py-config configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_512x1024.py \

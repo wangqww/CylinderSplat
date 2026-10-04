@@ -43,7 +43,6 @@ def test_rows():
         "mp3d_single_256": (3, "module", "module", "onecycle"),
         "loc360_all_256": (3, "module", None, "onecycle"),
         "mp3d_double_512": (1, "plain", "plain", "warmup_cosine"),
-        "mp3d_double_160": (1, "plain", "plain", "warmup_cosine"),
         "kansas_double_160": (1, "plain", "plain", "warmup_cosine"),
         "mp3d_double_512_ddp3": (3, "module", "module", "onecycle"),
         "mp3d_double_512_ddp4": (4, "module", "module", "onecycle"),
@@ -407,7 +406,7 @@ def test_other_process_counts_are_refused(row, monkeypatch, tmp_path):
     assert not work.exists()  # refused before anything is written
 
 
-@pytest.mark.parametrize("row", ["mp3d_double_256", "mp3d_double_160"])
+@pytest.mark.parametrize("row", ["mp3d_double_256", "kansas_double_160"])
 def test_ddp_forward(row, monkeypatch, tmp_path):
     events, work, _ = run_fake(monkeypatch, tmp_path, row, ["--switch", "ddp_forward=true"])
     event_names = names(events)
@@ -556,8 +555,8 @@ def test_no_resume_ignores_the_config(monkeypatch, tmp_path):
     config = FAKE_CONFIG.replace('resume_from = ""', 'resume_from = "/nonexistent/checkpoint-1"')
     assert config != FAKE_CONFIG
     with pytest.raises(ResumeError, match="not found"):
-        run_fake(monkeypatch, tmp_path, "mp3d_double_160", config=config, work_dir=tmp_path / "runs" / "resume")
-    events, _, _ = run_fake(monkeypatch, tmp_path, "mp3d_double_160", ["--no-resume"], config=config)
+        run_fake(monkeypatch, tmp_path, "kansas_double_160", config=config, work_dir=tmp_path / "runs" / "resume")
+    events, _, _ = run_fake(monkeypatch, tmp_path, "kansas_double_160", ["--no-resume"], config=config)
     assert "prepare" in names(events)
 
 

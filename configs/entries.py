@@ -198,40 +198,6 @@ ENTRIES = {
         num_processes=1,
         validation="plain",
     ),
-    # MP3D two-view, 160x320, one process: the ablation variants.
-    "mp3d_double_160": dict(
-        configs=[
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_pixel.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_volume.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_density.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_volume_density.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_volume_cluster.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_pixel_unifuse.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_volume_unifuse.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_unifuse.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_cylinder_pixel_depthanywhere.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_decare_volume.py",
-            "configs/OmniScene/omni_gs_160x320_mp3d_spherical_volume.py",
-        ],
-        loader=dict(
-            module="data.mp3d_dataloader_double",
-            factory="load_MP3D_data",
-            dataset_class="DatasetMP3D",
-            dataset_kwargs=dict(train=dict(stage="train"), val=dict(stage="val")),
-            call=_dataloader_call(32),
-            num_workers=32,
-            shuffle=False,
-            stages=LOADER_STAGES,
-            iterable=False,
-        ),
-        batch_size=dict(train="batch_size_train", val="batch_size_train"),
-        scheduler="warmup_cosine",
-        setup_order="model_before_loaders",
-        train_forward="plain",
-        num_processes=1,
-        validation="plain",
-    ),
     # Kansas City (VIGOR), 160x320, one process.
     "kansas_double_160": dict(
         configs=[

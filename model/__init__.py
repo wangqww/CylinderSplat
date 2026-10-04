@@ -10,10 +10,5 @@ from .omni_gs_cylinder_volume import OmniGaussianCylinderVolume
 from .omni_gs_cylinder_all import OmniGaussianCylinderAll
 from .omni_gs_cylinder_volume_360loc_pan2 import OmniGaussianCylinderVolume360LocPan2
 
-# ablations: other depth priors and triplane coordinates
+# Kansas City: the pixel model with a UniFuse depth prior (omni_gs_160x320_VIGOR_cylinder_pixel_unifuse.py)
 from .omni_gs_cylinder_pixel_unifuse import OmniGaussianCylinderPixelUniFuse
-from .omni_gs_cylinder_volume_unifuse import OmniGaussianCylinderVolumeUniFuse
-from .omni_gs_cylinder_all_unifuse import OmniGaussianCylinderAllUniFuse
-from .omni_gs_cylinder_pixel_depthanywhere import OmniGaussianCylinderPixelDepthanywhere
-from .omni_gs_decare_volume import OmniGaussianDecareVolume
-from .omni_gs_spherical_volume import OmniGaussianSphericalVolume
