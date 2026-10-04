@@ -1,55 +1,22 @@
-import math
+"""Gaussian splatting renderer (panorama rasterizer; optional cube-map "vanilla" rasterizer) and Gaussian helpers."""
+
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
-from einops import rearrange
-from pano2cube import Equirec2Cube, Cube2Equirec
+from pano2cube import Cube2Equirec
 
-renderer_type = "panorama" # "vanilla" or "panorama"
+renderer_type = "panorama"  # "vanilla" or "panorama"
 
-if renderer_type == 'panorama':
-    from pano_gaussian import (
-        GaussianRasterizationSettings, 
-        GaussianRasterizer
-    )
+if renderer_type == "panorama":
+    from pano_gaussian import GaussianRasterizationSettings, GaussianRasterizer
 else:
     # Only the cube-map ("vanilla") renderer needs diff-gaussian-rasterization; it is
     # imported only when that renderer is selected, so it is not an install requirement.
-    from diff_gaussian_rasterization import (
-        GaussianRasterizationSettings, 
-        GaussianRasterizer
-    )
+    from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 from .utils.ops import get_cam_info_gaussian
 from .utils.typing import *
-
-
-# D8 (switch render.prune_opacity, set by the entry points): GaussianRenderer.render
-# drops Gaussians whose opacity is below this threshold before panorama rasterisation.
-# 0 (default) = off, render() then runs exactly the released code.
-_prune_opacity = 0.0
-
-
-def set_prune_opacity(tau: float) -> None:
-    """Set the opacity pruning threshold of the panorama render (0 = off)."""
-    global _prune_opacity
-    tau = float(tau)
-    if not 0.0 <= tau < 1.0:
-        raise ValueError(f"prune_opacity must be in [0, 1), got {tau}")
-    _prune_opacity = tau
-
-
-def get_prune_opacity() -> float:
-    """Current opacity pruning threshold (0 = off)."""
-    return _prune_opacity
-
-
-def prune_by_opacity(tau, means3D, rgbs, opacity, rotations, scales):
-    """Keep the Gaussians with opacity >= tau; one mask for every per-Gaussian tensor."""
-    keep = opacity[:, 0] >= tau
-    return means3D[keep], rgbs[keep], opacity[keep], rotations[keep], scales[keep]
 
 
 C0 = 0.28209479177387814
@@ -64,7 +31,8 @@ def SH2RGB(sh):
 
 
 def inverse_sigmoid(x):
-    return torch.log(x/(1-x))
+    return torch.log(x / (1 - x))
+
 
 def strip_lowerdiag(L):
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
@@ -83,9 +51,7 @@ def strip_symmetric(sym):
 
 
 def build_rotation(r):
-    norm = torch.sqrt(
-        r[:, 0] * r[:, 0] + r[:, 1] * r[:, 1] + r[:, 2] * r[:, 2] + r[:, 3] * r[:, 3]
-    )
+    norm = torch.sqrt(r[:, 0] * r[:, 0] + r[:, 1] * r[:, 1] + r[:, 2] * r[:, 2] + r[:, 3] * r[:, 3])
 
     q = r / norm[:, None]
 
@@ -119,6 +85,7 @@ def build_scaling_rotation(s, r):
     L = R @ L
     return L
 
+
 def compute_equal_aabb_with_margin(
     minima: Float[Tensor, "*#batch 3"],
     maxima: Float[Tensor, "*#batch 3"],
@@ -132,6 +99,7 @@ def compute_equal_aabb_with_margin(
     scene_minima = midpoint - 0.5 * span
     scene_maxima = midpoint + 0.5 * span
     return scene_minima, scene_maxima
+
 
 class Depth2Normal(torch.nn.Module):
     def __init__(self, *args, **kwargs) -> None:
@@ -155,31 +123,27 @@ class Depth2Normal(torch.nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         delzdelxkernel = self.delzdelxkernel.view(1, 1, 3, 3).to(x.device)
-        delzdelx = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelxkernel, padding=1
-        ).reshape(B, C, H, W)
+        delzdelx = F.conv2d(x.reshape(B * C, 1, H, W), delzdelxkernel, padding=1).reshape(B, C, H, W)
         delzdelykernel = self.delzdelykernel.view(1, 1, 3, 3).to(x.device)
-        delzdely = F.conv2d(
-            x.reshape(B * C, 1, H, W), delzdelykernel, padding=1
-        ).reshape(B, C, H, W)
+        delzdely = F.conv2d(x.reshape(B * C, 1, H, W), delzdelykernel, padding=1).reshape(B, C, H, W)
         normal = -torch.cross(delzdelx, delzdely, dim=1)
         return normal
 
 
 class GaussianRenderer:
     def __init__(
-        self, 
+        self,
         device,
         resolution: list = [512, 512],
         znear: float = 0.1,
-        zfar: float = 100.0, 
+        zfar: float = 100.0,
         **kwargs,
-    ):  
+    ):
         self.renderer_type = renderer_type
-        if renderer_type == 'panorama':
+        if renderer_type == "panorama":
             self.resolution = resolution
         else:
-            self.resolution = [int(resolution[0]/2), int(resolution[1]/4)]
+            self.resolution = [int(resolution[0] / 2), int(resolution[1] / 4)]
         self.znear = znear
         self.zfar = zfar
         self.bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
@@ -188,36 +152,17 @@ class GaussianRenderer:
 
         self.setup_functions()
         self.C2E = Cube2Equirec(cube_length=resolution[0] // 2, equ_h=resolution[1] // 2)
-        self.extrinsics = torch.tensor([[[ 1.,  0.,  0.,  0.],
-                                        [ 0.,  1.,  0.,  0.],
-                                        [ 0.,  0.,  1.,  0.],
-                                        [ 0.,  0.,  0.,  1.]],
+        self.extrinsics = torch.tensor(
+            [
+                [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                [[0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                [[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [-0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                [[0.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            ]
+        )  ### w2c
 
-                                        [[ 0.,  0., -1.,  0.],
-                                        [ 0.,  1.,  0.,  0.],
-                                        [ 1.,  0.,  0.,  0.],
-                                        [ 0.,  0.,  0.,  1.]],
-
-                                        [[-1.,  0.,  0.,  0.],
-                                        [ 0.,  1.,  0.,  0.],
-                                        [-0.,  0., -1.,  0.],
-                                        [ 0.,  0.,  0.,  1.]],
-
-                                        [[ 0.,  0.,  1.,  0.],
-                                        [ 0.,  1.,  0.,  0.],
-                                        [-1.,  0.,  0.,  0.],
-                                        [ 0.,  0.,  0.,  1.]],
-
-                                        [[ 1.,  0.,  0.,  0.],
-                                        [ 0.,  0.,  1.,  0.],
-                                        [ 0., -1.,  0.,  0.],
-                                        [ 0.,  0.,  0.,  1.]],
-
-                                        [[ 1.,  0.,  0.,  0.],
-                                        [ 0.,  0., -1.,  0.],
-                                        [ 0.,  1.,  0.,  0.],
-                                        [ 0.,  0.,  0.,  1.]]]
-                                    ) ### w2c
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
@@ -236,15 +181,15 @@ class GaussianRenderer:
         self.rotation_activation = torch.nn.functional.normalize
 
     def render(
-        self, 
-        gaussians: Float[Tensor, "B N F"], 
+        self,
+        gaussians: Float[Tensor, "B N F"],
         c2w: Float[Tensor, "B V 4 4"],
         fovx: Float[Tensor, "B V"] = None,
         fovy: Float[Tensor, "B V"] = None,
         rays_o: Float[Tensor, "B V H W 3"] = None,
         rays_d: Float[Tensor, "B V H W 3"] = None,
-        bg_color: Float[Tensor, "... 3"] = None, 
-        scale_modifier: float = 1.,
+        bg_color: Float[Tensor, "... 3"] = None,
+        scale_modifier: float = 1.0,
     ):
         # gaussians: [B, N, 14]
         # cam_view, cam_view_proj: [B, V, 4, 4]
@@ -261,10 +206,10 @@ class GaussianRenderer:
 
         if self.renderer_type == "vanilla":
             c2b = torch.inverse(self.extrinsics).to(c2w.device)
-            c2w = c2w[:, :, None, :, :] @ c2b[None, None, :, :, :] # B V 6 4 4
+            c2w = c2w[:, :, None, :, :] @ c2b[None, None, :, :, :]  # B V 6 4 4
             c2w = c2w.reshape(c2w.shape[0], -1, 4, 4)
-            fovx = fovx.repeat(1,6)
-            fovy = fovy.repeat(1,6)
+            fovx = fovx.repeat(1, 6)
+            fovy = fovy.repeat(1, 6)
         B, V = c2w.shape[:2]
 
         # loop of loop...
@@ -272,15 +217,11 @@ class GaussianRenderer:
         alphas = []
         depths = []
         for b in range(B):
-
             means3D = gaussians[b, :, 0:3].contiguous().float()
-            rgbs = gaussians[b, :, 3:6].contiguous().float() # [N, 3]
+            rgbs = gaussians[b, :, 3:6].contiguous().float()  # [N, 3]
             opacity = gaussians[b, :, 6:7].contiguous().float()
             rotations = gaussians[b, :, 7:11].contiguous().float()
             scales = gaussians[b, :, 11:].contiguous().float()
-            if _prune_opacity > 0 and self.renderer_type == "panorama":
-                means3D, rgbs, opacity, rotations, scales = prune_by_opacity(
-                    _prune_opacity, means3D, rgbs, opacity, rotations, scales)
             means2D = torch.zeros_like(means3D, dtype=means3D.dtype, device=device)
 
             for v in range(V):
@@ -341,17 +282,18 @@ class GaussianRenderer:
                         rotations=rotations,
                         cov3D_precomp=None,
                     )
-                    rendered_normal = None
                 elif self.renderer_type == "panorama":
-                    rendered_image, feature_map, confidence_map, rendered_alpha, rendered_depth, rendered_radii = rasterizer(
-                        means3D=means3D,
-                        means2D=means2D,
-                        shs=None,
-                        colors_precomp=rgbs,
-                        opacities=opacity,
-                        scales=scales,
-                        rotations=rotations,
-                        cov3D_precomp=None,
+                    rendered_image, feature_map, confidence_map, rendered_alpha, rendered_depth, rendered_radii = (
+                        rasterizer(
+                            means3D=means3D,
+                            means2D=means2D,
+                            shs=None,
+                            colors_precomp=rgbs,
+                            opacities=opacity,
+                            scales=scales,
+                            rotations=rotations,
+                            cov3D_precomp=None,
+                        )
                     )
                 else:
                     raise NotImplementedError
@@ -369,25 +311,24 @@ class GaussianRenderer:
             alphas = self.C2E(torch.stack(alphas, dim=0)).view(B, -1, 1, self.resolution[0] * 2, self.resolution[1] * 4)
             depths = self.C2E(torch.stack(depths, dim=0)).view(B, -1, 1, self.resolution[0] * 2, self.resolution[1] * 4)
         return {
-            "image": images, # [B, V, 3, H, W]
-            "alpha": alphas, # [B, V, 1, H, W]
-            "depth": depths
+            "image": images,  # [B, V, 3, H, W]
+            "alpha": alphas,  # [B, V, 1, H, W]
+            "depth": depths,
         }
-
 
     def save_ply(self, gaussians, path, compatible=True):
         # gaussians: [B, N, 14]
         # compatible: save pre-activated gaussians as in the original paper
 
-        assert gaussians.shape[0] == 1, 'only support batch size 1'
+        assert gaussians.shape[0] == 1, "only support batch size 1"
 
         from plyfile import PlyData, PlyElement
-     
+
         means3D = gaussians[0, :, 0:3].contiguous().float()
         opacity = gaussians[0, :, 3:4].contiguous().float()
         scales = gaussians[0, :, 4:7].contiguous().float()
         rotations = gaussians[0, :, 7:11].contiguous().float()
-        shs = gaussians[0, :, 11:].unsqueeze(1).contiguous().float() # [N, 1, 3]
+        shs = gaussians[0, :, 11:].unsqueeze(1).contiguous().float()  # [N, 1, 3]
 
         # prune by opacity
         mask = opacity.squeeze(-1) >= 0.005
@@ -409,34 +350,39 @@ class GaussianRenderer:
         scales = scales.detach().cpu().numpy()
         rotations = rotations.detach().cpu().numpy()
 
-        l = ['x', 'y', 'z']
+        l = ["x", "y", "z"]
         # All channels except the 3 DC
         for i in range(f_dc.shape[1]):
-            l.append('f_dc_{}'.format(i))
-        l.append('opacity')
+            l.append("f_dc_{}".format(i))
+        l.append("opacity")
         for i in range(scales.shape[1]):
-            l.append('scale_{}'.format(i))
+            l.append("scale_{}".format(i))
         for i in range(rotations.shape[1]):
-            l.append('rot_{}'.format(i))
+            l.append("rot_{}".format(i))
 
-        dtype_full = [(attribute, 'f4') for attribute in l]
+        dtype_full = [(attribute, "f4") for attribute in l]
 
         elements = np.empty(xyzs.shape[0], dtype=dtype_full)
         attributes = np.concatenate((xyzs, f_dc, opacities, scales, rotations), axis=1)
         elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, 'vertex')
+        el = PlyElement.describe(elements, "vertex")
 
         PlyData([el]).write(path)
-    
+
     def load_ply(self, path, compatible=True):
 
-        from plyfile import PlyData, PlyElement
+        from plyfile import PlyData
 
         plydata = PlyData.read(path)
 
-        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
-                        np.asarray(plydata.elements[0]["y"]),
-                        np.asarray(plydata.elements[0]["z"])),  axis=1)
+        xyz = np.stack(
+            (
+                np.asarray(plydata.elements[0]["x"]),
+                np.asarray(plydata.elements[0]["y"]),
+                np.asarray(plydata.elements[0]["z"]),
+            ),
+            axis=1,
+        )
         print("Number of points at loading : ", xyz.shape[0])
 
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
@@ -455,9 +401,9 @@ class GaussianRenderer:
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
-          
+
         gaussians = np.concatenate([xyz, opacities, scales, rots, shs], axis=1)
-        gaussians = torch.from_numpy(gaussians).float() # cpu
+        gaussians = torch.from_numpy(gaussians).float()  # cpu
 
         if compatible:
             gaussians[..., 3:4] = torch.sigmoid(gaussians[..., 3:4])
@@ -465,12 +411,12 @@ class GaussianRenderer:
             gaussians[..., 11:] = 0.28209479177387814 * gaussians[..., 11:] + 0.5
 
         return gaussians
-    
+
     def render_orthographic(
-        self, 
+        self,
         gaussians: Float[Tensor, "B N F"],
-        bg_color: Float[Tensor, "... 3"] = None, 
-        scale_modifier: float = 1.,
+        bg_color: Float[Tensor, "... 3"] = None,
+        scale_modifier: float = 1.0,
         width: float = 30,
         height: float = 30,
         fov_degrees: float = 0.1,
@@ -484,19 +430,16 @@ class GaussianRenderer:
         alphas = []
         depths = []
         for b in range(B):
-
             means3D = gaussians[b, :, 0:3].contiguous().float()
             means2D = torch.zeros_like(means3D, dtype=means3D.dtype, device=device)
-            rgbs = gaussians[b, :, 3:6].contiguous().float() # [N, 3]
+            rgbs = gaussians[b, :, 3:6].contiguous().float()  # [N, 3]
             opacity = gaussians[b, :, 6:7].contiguous().float()
             rotations = gaussians[b, :, 7:11].contiguous().float()
             scales = gaussians[b, :, 11:].contiguous().float()
 
             minima = means3D.min(dim=0).values
             maxima = means3D.max(dim=0).values
-            scene_minima, scene_maxima = compute_equal_aabb_with_margin(
-                minima, maxima, margin=margin / 2
-            )
+            scene_minima, scene_maxima = compute_equal_aabb_with_margin(minima, maxima, margin=margin / 2)
 
             right_axis = (look_axis + 1) % 3
             down_axis = (look_axis + 2) % 3
@@ -578,7 +521,6 @@ class GaussianRenderer:
                     rotations=rotations,
                     cov3D_precomp=None,
                 )
-                rendered_normal = None
             elif self.renderer_type == "panorama":
                 rendered_image, feature_map, confidence_map, mask, rendered_depth, rendered_alpha = rasterizer(
                     means3D=means3D,
@@ -603,7 +545,7 @@ class GaussianRenderer:
         depths = torch.stack(depths, dim=0).view(B, 1, bev_width, bev_width)
 
         return {
-            "image": images, # [B, V, 3, H, W]
-            "alpha": alphas, # [B, V, 1, H, W]
-            "depth": depths
+            "image": images,  # [B, V, 3, H, W]
+            "alpha": alphas,  # [B, V, 1, H, W]
+            "depth": depths,
         }

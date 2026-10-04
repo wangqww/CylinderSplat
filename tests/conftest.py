@@ -1,9 +1,14 @@
-"""Shared pytest setup.
+"""Shared test setup: the repository root on sys.path and a few helpers.
 
-Tests run from the repository root in the `omniscene` environment. CPU-only by
-default (CUDA_VISIBLE_DEVICES=""); tests marked `gpu` are skipped without CUDA.
+The suite runs on CPU from the repository root, in the training environment:
+
+    CUDA_VISIBLE_DEVICES= python -m pytest tests/
+
+Tests that need torch, mmengine, mmdet3d or the compiled CUDA extensions skip when they are missing.
 """
 
+import glob
+import importlib.util
 import os
 import sys
 
@@ -14,19 +19,26 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "gpu: needs a CUDA device (skipped on CPU-only runs)")
+def load_by_path(rel, name):
+    """Import a repository file by path (configs/ is not a package; a site-packages `evaluate` must not shadow ours)."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO_ROOT, rel))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def pytest_collection_modifyitems(config, items):
+def kept_configs():
+    """Every model config, repository-relative: configs/OmniScene/*.py and the release/ recipes."""
+    root = os.path.join(REPO_ROOT, "configs", "OmniScene")
+    paths = glob.glob(os.path.join(root, "*.py")) + glob.glob(os.path.join(root, "release", "*.py"))
+    return sorted(os.path.relpath(path, REPO_ROOT) for path in paths)
+
+
+def import_models():
+    """builder.builder, which registers every model class; skips the test when the model package cannot be
+    imported here (torch, mmdet3d or a compiled CUDA extension missing)."""
     try:
-        import torch
-        has_cuda = torch.cuda.is_available()
-    except Exception:
-        has_cuda = False
-    if has_cuda:
-        return
-    skip = pytest.mark.skip(reason="needs CUDA")
-    for item in items:
-        if "gpu" in item.keywords:
-            item.add_marker(skip)
+        from builder import builder
+    except ImportError as e:
+        pytest.skip(f"model package not importable: {e}")
+    return builder

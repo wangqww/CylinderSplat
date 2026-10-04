@@ -29,7 +29,7 @@ RUN git clone --branch v2.1.0 --depth 1 https://github.com/open-mmlab/mmcv.git /
 # pytorch3d 0.7.8
 RUN pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
 
-# Python dependencies (pinned; the file's --find-links line gets the torch-scatter wheel)
+# Python dependencies (pinned)
 COPY docker/pip_requirements.txt /pip_requirements.txt
 RUN pip install --requirement /pip_requirements.txt
 

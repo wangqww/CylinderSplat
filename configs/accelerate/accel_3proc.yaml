@@ -1,6 +1,5 @@
 # Three processes on GPUs 1-3: rows mp3d_double_256, mp3d_single_256, loc360_all_256.
 # Pass --main_process_port when another multi-process run is active on the machine.
-# The committed accelerate_config.yaml (GPUs 0,2,3, debug on) is not used.
 compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: MULTI_GPU

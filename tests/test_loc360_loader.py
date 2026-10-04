@@ -1,11 +1,11 @@
 """data/loc360_dataloader_double_all_512.py options on a tiny fake 360Loc tree (CPU):
 
-- loc360_interleave (D10): every (sequence, i) pair of an epoch exactly once, the sequences mixed,
+- loc360_interleave: every (sequence, i) pair of an epoch exactly once, the sequences mixed,
   and each sample bit-identical to the one the released per-sequence stream builds for the same
   frames (the uint8 frame cache reproduces to_tensor exactly);
 - pcc_reference='depth_anywhere' (eval row loc360_double_256_da): only outputs['depth'] changes;
 - the constructor refuses options outside their split; convert_images(strict=True) raises.
-The model side of the 360Loc fixes (depth_valid_mask, D11) is checked at the end.
+The model side of the 360Loc fixes (depth_valid_mask) is checked at the end.
 """
 
 import collections
@@ -34,12 +34,14 @@ def make_sequence(root, scene, name, seed, depth_anywhere=False):
     for k in range(N_FRAMES):
         frame = f"{k:04d}.jpg"
         PIL.fromarray((rng.rand(32, 64, 3) * 255).astype(np.uint8)).save(seq / "image" / frame, quality=95)
-        np.save(seq / "depth_metric" / frame.replace(".jpg", "_depth.npy"),
-                (rng.rand(1, 16, 32) * 10).astype(np.float32))
+        np.save(
+            seq / "depth_metric" / frame.replace(".jpg", "_depth.npy"), (rng.rand(1, 16, 32) * 10).astype(np.float32)
+        )
         np.save(seq / "depth_metric" / frame.replace(".jpg", "_conf.npy"), rng.rand(1, 16, 32).astype(np.float32))
         if depth_anywhere:
             PIL.fromarray((rng.rand(16, 32) * 255).astype(np.uint8), mode="L").save(
-                seq / "depthanywhere" / frame.replace(".jpg", "_depth_anywhere.png"))
+                seq / "depthanywhere" / frame.replace(".jpg", "_depth_anywhere.png")
+            )
         pose = np.eye(4)
         pose[0, 3] = 0.5 * k
         poses[frame] = pose.tolist()
@@ -50,8 +52,10 @@ def make_sequence(root, scene, name, seed, depth_anywhere=False):
 
 @pytest.fixture
 def train_sequences(tmp_path):
-    return [make_sequence(tmp_path, scene, "daytime_360_0", seed)
-            for seed, scene in enumerate(("concourse", "hall", "piatrium"))]
+    return [
+        make_sequence(tmp_path, scene, "daytime_360_0", seed)
+        for seed, scene in enumerate(("concourse", "hall", "piatrium"))
+    ]
 
 
 def dataset(stage, sequences, **kwargs):
@@ -113,7 +117,7 @@ def test_released_stream_is_one_sequence_after_another(monkeypatch, train_sequen
     calls = recording_two_sample(monkeypatch)
     torch.manual_seed(0)
     order = [key for key, _ in collect(dataset("train", train_sequences), calls)]
-    blocks = [order[k:k + TIMES] for k in range(0, len(order), TIMES)]
+    blocks = [order[k : k + TIMES] for k in range(0, len(order), TIMES)]
     assert all(len({scene for scene, _ in block}) == 1 for block in blocks)
 
 
@@ -145,7 +149,7 @@ def test_depth_anywhere_reference_changes_only_outputs_depth(monkeypatch, tmp_pa
     for (key, a), (_, b) in zip(default, da):
         j = key[1] % (N_FRAMES - 3)
         pngs = [seq / "depthanywhere" / f"{k:04d}_depth_anywhere.png" for k in range(j, j + 4)]
-        expected = ds.convert_images(pngs).clamp(min=0.)
+        expected = ds.convert_images(pngs).clamp(min=0.0)
         assert torch.equal(b["outputs"]["depth"], expected)
         assert not torch.equal(a["outputs"]["depth"], b["outputs"]["depth"])
         a["outputs"].pop("depth"), b["outputs"].pop("depth")
@@ -161,18 +165,24 @@ def test_depth_anywhere_loader_factory(monkeypatch):
     loader = da.load_360Loc_data_da(2, stage="val")
     assert built == [{"stage": "val", "pcc_reference": "depth_anywhere"}]
     reference = L.load_360Loc_data(2, stage="val")
-    assert (loader.batch_size, loader.num_workers, loader.persistent_workers) == \
-           (reference.batch_size, reference.num_workers, reference.persistent_workers)
+    assert (loader.batch_size, loader.num_workers, loader.persistent_workers) == (
+        reference.batch_size,
+        reference.num_workers,
+        reference.persistent_workers,
+    )
     assert loader.generator.initial_seed() == reference.generator.initial_seed() == 3456
     with pytest.raises(ValueError, match="evaluation loader"):
         da.load_360Loc_data_da(2, stage="train")
 
 
-@pytest.mark.parametrize("kwargs,match", [
-    (dict(stage="val", interleave=True), "train split only"),
-    (dict(stage="train", pcc_reference="depth_anywhere"), "evaluation stages only"),
-    (dict(stage="val", pcc_reference="gt"), "pcc_reference must be"),
-])
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        (dict(stage="val", interleave=True), "train split only"),
+        (dict(stage="train", pcc_reference="depth_anywhere"), "evaluation stages only"),
+        (dict(stage="val", pcc_reference="gt"), "pcc_reference must be"),
+    ],
+)
 def test_constructor_refuses_options_outside_their_split(kwargs, match):
     with pytest.raises(ValueError, match=match):
         L.Dataset360Loc(**kwargs)
@@ -195,6 +205,7 @@ def test_prior_depth_valid_mask_bounds():
     depth = torch.tensor([0.0, 0.45, 0.46, 49.9, 50.0, 60.0])
     assert cls._prior_depth_valid(holder, depth).tolist() == [False, False, True, True, False, False]
     import inspect
+
     params = inspect.signature(cls.__init__).parameters
     assert params["depth_valid_mask"].default is False
     assert (params["depth_valid_near"].default, params["depth_valid_far"].default) == (0.45, 50.0)

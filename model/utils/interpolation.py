@@ -1,3 +1,5 @@
+"""Camera intrinsics and extrinsics interpolation helpers."""
+
 import torch
 from einops import einsum, rearrange, reduce
 from jaxtyping import Float

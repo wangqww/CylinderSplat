@@ -1,22 +1,20 @@
-import functools
+"""ResNet-FPN image backbone with multi-view transformer feature matching (GMFlow style)."""
+
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
 import torch.nn.functional as F
-import torchvision
 from einops import rearrange
 from jaxtyping import Float
 from torch import Tensor, nn
 from torchvision.models import ResNet
 from mmengine.registry import MODELS
-from torch.utils.checkpoint import checkpoint
 
 from .backbone import Backbone
 from .unimatch.utils import split_feature, merge_splits
 from .unimatch.position import PositionEmbeddingSine
 from .multiview_transformer import MultiViewFeatureTransformer
-# from .multiview_transformer_prope import MultiViewFeatureTransformer
 
 
 class Swish(nn.Module):
@@ -26,20 +24,17 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
 
+
 def feature_add_position_list(features_list, attn_splits, feature_channels):
     pos_enc = PositionEmbeddingSine(num_pos_feats=feature_channels // 2)
 
     if attn_splits > 1:  # add position in splited window
-        features_splits = [
-            split_feature(x, num_splits=attn_splits) for x in features_list
-        ]
+        features_splits = [split_feature(x, num_splits=attn_splits) for x in features_list]
 
         position = pos_enc(features_splits[0])
         features_splits = [x + position for x in features_splits]
 
-        out_features_list = [
-            merge_splits(x, num_splits=attn_splits) for x in features_splits
-        ]
+        out_features_list = [merge_splits(x, num_splits=attn_splits) for x in features_splits]
 
     else:
         position = pos_enc(features_list[0])
@@ -47,6 +42,7 @@ def feature_add_position_list(features_list, attn_splits, feature_channels):
         out_features_list = [x + position for x in features_list]
 
     return out_features_list
+
 
 def init_bn(module):
     if module.weight is not None:
@@ -64,6 +60,7 @@ def init_uniform(module, init_method):
             nn.init.xavier_uniform_(module.weight)
     return
 
+
 class Conv2d(nn.Module):
     """Applies a 2D convolution (optionally with batch normalization and relu activation)
     over an input signal composed of several input planes.
@@ -78,16 +75,26 @@ class Conv2d(nn.Module):
 
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
-                 relu=True, bn=True, bn_momentum=0.1, norm_type='IN', **kwargs):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        relu=True,
+        bn=True,
+        bn_momentum=0.1,
+        norm_type="IN",
+        **kwargs,
+    ):
         super(Conv2d, self).__init__()
 
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, bias=(not bn), **kwargs)
         self.kernel_size = kernel_size
         self.stride = stride
-        if norm_type == 'IN':
+        if norm_type == "IN":
             self.bn = nn.InstanceNorm2d(out_channels, momentum=bn_momentum) if bn else None
-        elif norm_type == 'BN':
+        elif norm_type == "BN":
             self.bn = nn.BatchNorm2d(out_channels, momentum=bn_momentum) if bn else None
         self.relu = relu
 
@@ -107,16 +114,20 @@ class Conv2d(nn.Module):
 
 
 class FPNEncoder(nn.Module):
-    def __init__(self, feat_chs, norm_type='BN'):
+    def __init__(self, feat_chs, norm_type="BN"):
         self.feat_chs = feat_chs
         super(FPNEncoder, self).__init__()
         self.conv00 = Conv2d(3, feat_chs[0], 7, 1, padding=3, norm_type=norm_type)
         self.conv01 = Conv2d(feat_chs[0], feat_chs[0], 5, 1, padding=2, norm_type=norm_type)
 
         for i, c in enumerate(feat_chs[1:]):
-            setattr(self, f'downsample{i+1}', Conv2d(feat_chs[i], c, 5 if i < 2 else 3, 2, padding=2 if i < 2 else 1, norm_type=norm_type))
-            setattr(self, f'conv{i+1}0', Conv2d(c, c, 3, 1, padding=1, norm_type=norm_type))
-            setattr(self, f'conv{i+1}1', Conv2d(c, c, 3, 1, padding=1, norm_type=norm_type))
+            setattr(
+                self,
+                f"downsample{i + 1}",
+                Conv2d(feat_chs[i], c, 5 if i < 2 else 3, 2, padding=2 if i < 2 else 1, norm_type=norm_type),
+            )
+            setattr(self, f"conv{i + 1}0", Conv2d(c, c, 3, 1, padding=1, norm_type=norm_type))
+            setattr(self, f"conv{i + 1}1", Conv2d(c, c, 3, 1, padding=1, norm_type=norm_type))
 
     def forward(self, x):
         x = self.conv00(x)
@@ -124,12 +135,13 @@ class FPNEncoder(nn.Module):
         output = [x]
 
         for i in range(1, len(self.feat_chs)):
-            x = getattr(self, f'downsample{i}')(x)
-            x = getattr(self, f'conv{i}0')(x)
-            x = getattr(self, f'conv{i}1')(x)
+            x = getattr(self, f"downsample{i}")(x)
+            x = getattr(self, f"conv{i}0")(x)
+            x = getattr(self, f"conv{i}1")(x)
             output.append(x)
 
         return output
+
 
 class FPNDecoder(nn.Module):
     def __init__(self, feat_chs):
@@ -139,28 +151,34 @@ class FPNDecoder(nn.Module):
         self.out0 = nn.Sequential(nn.Conv2d(final_ch, feat_chs[0], kernel_size=1), nn.BatchNorm2d(feat_chs[0]), Swish())
 
         for i, c in enumerate(feat_chs[1:]):
-            setattr(self, f'inner{i+1}', nn.Conv2d(c, final_ch, 1))
-            setattr(self, f'out{i+1}', nn.Sequential(nn.Conv2d(final_ch, c, kernel_size=3, padding=1), nn.BatchNorm2d(c), Swish()))
+            setattr(self, f"inner{i + 1}", nn.Conv2d(c, final_ch, 1))
+            setattr(
+                self,
+                f"out{i + 1}",
+                nn.Sequential(nn.Conv2d(final_ch, c, kernel_size=3, padding=1), nn.BatchNorm2d(c), Swish()),
+            )
 
     def forward(self, xs):
         intra_feat = xs[-1]
         output = [self.out0(intra_feat)]
 
         for i in range(1, len(xs)):
-            intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="bilinear", align_corners=True) + getattr(self, f'inner{i}')(xs[-i-1])
-            output.append(getattr(self, f'out{i}')(intra_feat))
+            intra_feat = F.interpolate(intra_feat, scale_factor=2, mode="bilinear", align_corners=True) + getattr(
+                self, f"inner{i}"
+            )(xs[-i - 1])
+            output.append(getattr(self, f"out{i}")(intra_feat))
 
         return output
+
 
 @dataclass
 class BackboneResnetCfg:
     name: Literal["resnet"]
-    model: Literal[
-        "resnet18", "resnet34", "resnet50", "resnet101", "resnet152", "dino_resnet50"
-    ]
+    model: Literal["resnet18", "resnet34", "resnet50", "resnet101", "resnet152", "dino_resnet50"]
     num_layers: int
     use_first_pool: bool
     d_out: int
+
 
 @MODELS.register_module()
 class BackboneResnet(Backbone[BackboneResnetCfg]):
@@ -173,7 +191,7 @@ class BackboneResnet(Backbone[BackboneResnetCfg]):
         ffn_dim_expansion=4,
         no_cross_attn=False,
         num_head=1,
-        ) -> None:
+    ) -> None:
         super().__init__()
         self.feature_channels = feature_channels
         # Table 3: w/o cross-view attention
@@ -192,14 +210,12 @@ class BackboneResnet(Backbone[BackboneResnetCfg]):
         )
 
     def normalize_images(self, images):
-        '''Normalize image to match the pretrained GMFlow backbone.
-            images: (B, N_Views, C, H, W)
-        '''
-        shape = [*[1]*(images.dim() - 3), 3, 1, 1]
-        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(
-            *shape).to(images.device)
-        std = torch.tensor([0.229, 0.224, 0.225]).reshape(
-            *shape).to(images.device)
+        """Normalize image to match the pretrained GMFlow backbone.
+        images: (B, N_Views, C, H, W)
+        """
+        shape = [*[1] * (images.dim() - 3), 3, 1, 1]
+        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(*shape).to(images.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).reshape(*shape).to(images.device)
 
         return (images - mean) / std
 
@@ -238,28 +254,23 @@ class BackboneResnet(Backbone[BackboneResnetCfg]):
     def forward(
         self,
         img,
-        depths_in, 
-        confs_in, 
+        depths_in,
+        confs_in,
         pluckers,
         viewmats,
         attn_splits=2,
     ) -> Float[Tensor, "batch view d_out height width"]:
-        ''' images: (B, N_Views, C, H, W), range [0, 1] '''
+        """images: (B, N_Views, C, H, W), range [0, 1]"""
         # resolution low to high
-        features_list = self.extract_feature(
-            self.normalize_images(img)
-        )  # list of features
+        features_list = self.extract_feature(self.normalize_images(img))  # list of features
 
         cur_features_list = [x[0] for x in features_list]
 
         # add position to features
-        cur_features_list = feature_add_position_list(
-            cur_features_list, attn_splits, self.feature_channels[0])
+        cur_features_list = feature_add_position_list(cur_features_list, attn_splits, self.feature_channels[0])
 
         # Transformer
-        cur_features_list = self.transformer(
-            cur_features_list, attn_num_splits=attn_splits
-        )
+        cur_features_list = self.transformer(cur_features_list, attn_num_splits=attn_splits)
 
         cur_features = torch.stack(cur_features_list, dim=1)  # [B, V, C, H, W]
         cnn_features = []

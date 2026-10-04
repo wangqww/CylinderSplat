@@ -1,7 +1,7 @@
-from dataclasses import dataclass
+"""360Loc two-view panorama loader at 256x512 (despite the file name) for the 360Loc train and eval rows."""
+
 from pathlib import Path
 from typing import Literal
-import os
 
 import torch
 import torchvision.transforms as tf
@@ -13,24 +13,25 @@ from torch.utils.data import IterableDataset, DataLoader
 import numpy as np
 
 import random
-from torch import Generator, nn
+from torch import Generator
 
-from einops import rearrange
 import torch.nn.functional as F
 import json
 from functools import cached_property
 from model.utils.ops import get_panorama_ray_directions, get_rays
-import matplotlib.pyplot as plt
 
 pano_width = 512
 pano_height = 256
 
-w2w = torch.tensor([  #  X -> X, Z -> Y, Y -> -Z
-    [1, 0, 0, 0],
-    [0, 0, 1, 0],
-    [0, -1, 0, 0],
-    [0, 0, 0, 1],
-]).float()
+w2w = torch.tensor(
+    [  #  X -> X, Z -> Y, Y -> -Z
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, -1, 0, 0],
+        [0, 0, 0, 1],
+    ]
+).float()
+
 
 def one_sample(scene, extrinsics, stage="train", i=0):
     num_views, _, _ = extrinsics.shape
@@ -39,15 +40,18 @@ def one_sample(scene, extrinsics, stage="train", i=0):
     # Pick the left and right context indices.
 
     if stage == "val":
-        index_context_left = (num_views - context_gap - 1) * (i+1) / max((100 + 1), 1)
+        index_context_left = (num_views - context_gap - 1) * (i + 1) / max((100 + 1), 1)
         index_context_left = int(index_context_left)
     else:
         index_context_left = torch.randint(context_gap, (num_views - context_gap - 1), (1,)).item()
 
     return (
         torch.tensor([index_context_left]),
-        torch.tensor((index_context_left - context_gap//2, index_context_left, index_context_left + context_gap//2)),
+        torch.tensor(
+            (index_context_left - context_gap // 2, index_context_left, index_context_left + context_gap // 2)
+        ),
     )
+
 
 def two_sample(scene, extrinsics, times_per_scene, stage="train", i=0):
     num_views, _, _ = extrinsics.shape
@@ -66,7 +70,7 @@ def two_sample(scene, extrinsics, times_per_scene, stage="train", i=0):
         min_gap,
         max_gap + 1,
         size=tuple(),
-        device='cpu',
+        device="cpu",
     ).item()
 
     # Pick the left and right context indices.
@@ -78,20 +82,14 @@ def two_sample(scene, extrinsics, times_per_scene, stage="train", i=0):
         index_context_left = torch.randint(
             num_views - context_gap,
             size=tuple(),
-            device='cpu',
+            device="cpu",
         ).item()
     index_context_right = index_context_left + context_gap
-
-    # index_target = torch.arange(
-    #         index_context_left + 1,
-    #         index_context_right,
-    #         device='cpu',
-    #     )
 
     index_target = torch.arange(
         index_context_left,
         index_context_right + 1,
-        device='cpu',
+        device="cpu",
     )
 
     return (
@@ -135,15 +133,13 @@ class Dataset360Loc(IterableDataset):
         self.height = pano_height
 
         if stage == "train":
-            locations = ['concourse', 'hall', 'piatrium']
-            # locations = ['hall']
+            locations = ["concourse", "hall", "piatrium"]
         else:
-            locations = ['atrium']
-        root = Path('/data/qiwei/nips25/360Loc')
+            locations = ["atrium"]
+        root = Path("/data/qiwei/nips25/360Loc")
         self.data = []
         for location in locations:
-            seqs = [list((root / location / folder).glob('*360*/')) for folder in ('mapping', 'query_360')]
-            # seqs = [list((root / location / folder).glob('daytime_360*/')) for folder in ('mapping', 'query_360')]
+            seqs = [list((root / location / folder).glob("*360*/")) for folder in ("mapping", "query_360")]
             seqs = sum(seqs, [])
             self.data.extend(seqs)
 
@@ -156,7 +152,7 @@ class Dataset360Loc(IterableDataset):
         return [lst[x] for x in indices]
 
     def load_extrinsics(self, example_path):
-        example = example_path / 'camera_pose.json'
+        example = example_path / "camera_pose.json"
         with open(example) as f:
             example = json.load(f)
         frames, extrinsics_orig = list(example.keys()), list(example.values())
@@ -191,7 +187,7 @@ class Dataset360Loc(IterableDataset):
             scene = f"{example_path.parts[-3]}-{example_path.parts[-1]}"
 
             if self.stage == "train":
-                images_path = [example_path / 'image' / frame for frame in frames]
+                images_path = [example_path / "image" / frame for frame in frames]
                 images = self.convert_images(images_path)
 
             for i in range(self.times_per_scene):
@@ -205,11 +201,16 @@ class Dataset360Loc(IterableDataset):
                 if context_indices is None:
                     break
 
+                yield self._make_sample(
+                    example_path,
+                    frames,
+                    extrinsics_orig,
+                    context_indices,
+                    target_indices,
+                    images=images if self.stage == "train" else None,
+                    images_path=images_path if self.stage == "train" else None,
+                )
 
-                yield self._make_sample(example_path, frames, extrinsics_orig, context_indices, target_indices,
-                                        images=images if self.stage == "train" else None,
-                                        images_path=images_path if self.stage == "train" else None)
-                
     def _iter_interleaved(self):
         """loc360_interleave: every (sequence, i) pair of the epoch in one random order.
 
@@ -222,12 +223,13 @@ class Dataset360Loc(IterableDataset):
         data = list(self.data)
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
-            data = [example for data_idx, example in enumerate(data)
-                    if data_idx % worker_info.num_workers == worker_info.id]
+            data = [
+                example for data_idx, example in enumerate(data) if data_idx % worker_info.num_workers == worker_info.id
+            ]
         sequences = []
         for example_path in data:
             frames, extrinsics_orig = self.load_extrinsics(example_path)
-            images_path = [example_path / 'image' / frame for frame in frames]
+            images_path = [example_path / "image" / frame for frame in frames]
             sequences.append((example_path, frames, extrinsics_orig, images_path))
         pairs = [(s, i) for s in range(len(sequences)) for i in range(self.times_per_scene)]
         for k in torch.randperm(len(pairs)).tolist():
@@ -241,11 +243,19 @@ class Dataset360Loc(IterableDataset):
                 stage=self.stage,
                 i=i,
             )
-            yield self._make_sample(example_path, frames, extrinsics_orig, context_indices, target_indices,
-                                    images=_FrameCache(self, images_path), images_path=images_path)
+            yield self._make_sample(
+                example_path,
+                frames,
+                extrinsics_orig,
+                context_indices,
+                target_indices,
+                images=_FrameCache(self, images_path),
+                images_path=images_path,
+            )
 
-    def _make_sample(self, example_path, frames, extrinsics_orig, context_indices, target_indices,
-                     images=None, images_path=None):
+    def _make_sample(
+        self, example_path, frames, extrinsics_orig, context_indices, target_indices, images=None, images_path=None
+    ):
         """One sample. Train: `images` indexes the sequence's frames (the stacked sequence, or the
         loc360_interleave frame cache) and `images_path` lists their files; other stages read files."""
         # Resize the world to make the baseline 1.
@@ -254,18 +264,17 @@ class Dataset360Loc(IterableDataset):
         ref_extrinsics = target_extrinsics[:1]
         target_extrinsics_relative = torch.inverse(ref_extrinsics) @ target_extrinsics
         context_extrinsics_relative = torch.inverse(ref_extrinsics) @ context_extrinsics
-        # target_extrinsics_relative = w2w.T @ target_extrinsics_relative @ w2w
 
         # Load the images.
         if self.stage == "train":
             context_images = images[context_indices]
             target_images = images[target_indices]
         else:
-            context_images_path = [example_path / 'image' / frames[i] for i in context_indices]
+            context_images_path = [example_path / "image" / frames[i] for i in context_indices]
             context_images = self.convert_images(context_images_path)
-            target_images_path = [example_path / 'image' / frames[i] for i in target_indices]
+            target_images_path = [example_path / "image" / frames[i] for i in target_indices]
             target_images = self.convert_images(target_images_path)
-        
+
         input_dict = {"rgb": context_images}
 
         # Load the depth.
@@ -276,76 +285,75 @@ class Dataset360Loc(IterableDataset):
         confs_m_path = []
         if self.stage == "train":
             for i in index:
-                depths_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
-                depths_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
-                confs_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_conf.npy'))
+                depths_path.append(str(images_path[i]).replace("image", "depth_metric").replace(".jpg", "_depth.npy"))
+                depths_m_path.append(str(images_path[i]).replace("image", "depth_metric").replace(".jpg", "_depth.npy"))
+                confs_m_path.append(str(images_path[i]).replace("image", "depth_metric").replace(".jpg", "_conf.npy"))
         else:
-            depths_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
-            depths_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
-            confs_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_conf.npy') for i in index]
+            depths_path = [example_path / "depth_metric" / frames[i].replace(".jpg", "_depth.npy") for i in index]
+            depths_m_path = [example_path / "depth_metric" / frames[i].replace(".jpg", "_depth.npy") for i in index]
+            confs_m_path = [example_path / "depth_metric" / frames[i].replace(".jpg", "_conf.npy") for i in index]
 
         target_index = len(context_indices)
 
         if self.pcc_reference == "depth_anywhere":
             # PCC reference = Depth Anywhere pseudo-GT, read like the 160x320 loader
             # (data/loc360_dataloader_double_all.py: the png through convert_images, then clamp)
-            depths_path = [example_path / 'depthanywhere' / frames[i].replace('.jpg', '_depth_anywhere.png') for i in index]
+            depths_path = [
+                example_path / "depthanywhere" / frames[i].replace(".jpg", "_depth_anywhere.png") for i in index
+            ]
             context_depths = self.convert_images(depths_path[:target_index], strict=True)
             target_depths = self.convert_images(depths_path[target_index:], strict=True)
         else:
             context_depths = self.convert_depths(depths_path[:target_index])
             target_depths = self.convert_depths(depths_path[target_index:])
         # metric depth path
-        # depths_path = [str(scene_path / v / 'depth.png') for v in views]
         context_m_depths = self.convert_depths(depths_m_path[:target_index])
         target_m_depths = self.convert_depths(depths_m_path[target_index:])
 
         context_m_confs = self.convert_depths(confs_m_path[:target_index])
         target_m_confs = self.convert_depths(confs_m_path[target_index:])
 
-        # context_depths = context_depths.float() / 1000
-        # target_depths = target_depths.float() / 1000
-        context_depths = context_depths.clamp(min=0.)
-        target_depths = target_depths.clamp(min=0.)
-        context_mask = (context_m_depths > self.near) & (context_m_depths < self.far)
-        target_mask = (target_m_depths > self.near) & (target_m_depths < self.far)
+        context_depths = context_depths.clamp(min=0.0)
+        target_depths = target_depths.clamp(min=0.0)
 
         # process rays
         output_fovxs = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
         output_fovys = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
         input_directions = output_directions = self.direction.unsqueeze(0)
-        
+
         input_rays_o, input_rays_d = get_rays(
-            input_directions, context_extrinsics_relative, keepdim=True, normalize=False)
+            input_directions, context_extrinsics_relative, keepdim=True, normalize=False
+        )
         output_rays_o, output_rays_d = get_rays(
-                            output_directions, target_extrinsics_relative, keepdim=True, normalize=False)
+            output_directions, target_extrinsics_relative, keepdim=True, normalize=False
+        )
         fx, fy, cx, cy = 0.25, 0.5, 0.5, 0.5
-        
+
         input_dict_pix = {
-            "depth_m": context_m_depths, 
+            "depth_m": context_m_depths,
             "conf_m": context_m_confs,
-            "ck": torch.zeros(1,3,3), 
+            "ck": torch.zeros(1, 3, 3),
             "c2w": context_extrinsics_relative,
-            "cx": torch.tensor([cx]), 
-            "cy": torch.tensor([cy]), 
-            "fx": torch.tensor([fx]), 
+            "cx": torch.tensor([cx]),
+            "cy": torch.tensor([cy]),
+            "fx": torch.tensor([fx]),
             "fy": torch.tensor([fy]),
-            "rays_o": input_rays_o, 
-            "rays_d": input_rays_d
+            "rays_o": input_rays_o,
+            "rays_d": input_rays_d,
         }
 
         input_dict_vol = {"w2i": torch.inverse(context_extrinsics_relative)}
 
         output_dict = {
-            "rgb": target_images, 
+            "rgb": target_images,
             "depth": target_depths,
-            "depth_m": target_m_depths, 
+            "depth_m": target_m_depths,
             "conf_m": target_m_confs,
-            "c2w": target_extrinsics_relative, 
-            "fovx": output_fovxs, 
-            "fovy": output_fovys, 
+            "c2w": target_extrinsics_relative,
+            "fovx": output_fovxs,
+            "fovy": output_fovys,
             "rays_o": output_rays_o,
-            "rays_d": output_rays_d, 
+            "rays_d": output_rays_d,
         }
 
         return {
@@ -364,10 +372,7 @@ class Dataset360Loc(IterableDataset):
             depth = np.load(depth_path, allow_pickle=False)
             depth = torch.tensor(depth, dtype=torch.float32)
             torch_depths.append(depth)
-        return F.interpolate(torch.stack(torch_depths),
-                             size=(self.height, self.width), 
-                             mode='nearest'
-                             )
+        return F.interpolate(torch.stack(torch_depths), size=(self.height, self.width), mode="nearest")
 
     def convert_images(
         self,
@@ -403,18 +408,17 @@ class Dataset360Loc(IterableDataset):
                 raise ValueError(f"{path}: expected an RGB image, got mode {image.mode}")
             cache[key] = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).contiguous()
         return cache[key]
-    
+
     def convert_poses(
         self,
         context_extrinsics,
         target_extrinsics,
     ):  # extrinsics
 
-        # w2c = context_extrinsics @ torch.inverse(target_extrinsics)
         c2w = torch.inverse(context_extrinsics) @ target_extrinsics
         c2w = w2w @ c2w
         return c2w
-    
+
     def get_bound(
         self,
         bound: Literal["near", "far"],
@@ -426,6 +430,7 @@ class Dataset360Loc(IterableDataset):
     def __len__(self) -> int:
         return len(self.data) * self.times_per_scene
 
+
 class _FrameCache:
     """images[index] for one sequence, served from Dataset360Loc.frame_uint8 (loc360_interleave)."""
 
@@ -434,8 +439,7 @@ class _FrameCache:
         self.images_path = images_path
 
     def __getitem__(self, indices):
-        return torch.stack([self.dataset.frame_uint8(self.images_path[int(i)]).float().div(255)
-                            for i in indices])
+        return torch.stack([self.dataset.frame_uint8(self.images_path[int(i)]).float().div(255) for i in indices])
 
 
 def get_generator(seed):
@@ -443,11 +447,13 @@ def get_generator(seed):
     generator.manual_seed(seed)
     return generator
 
+
 def worker_init_fn(worker_id: int) -> None:
     random.seed(int(torch.utils.data.get_worker_info().seed) % (2**32 - 1))
     np.random.seed(int(torch.utils.data.get_worker_info().seed) % (2**32 - 1))
 
-def load_360Loc_data(batch_size, stage='train'):
+
+def load_360Loc_data(batch_size, stage="train"):
     """
 
     Args:
@@ -455,84 +461,29 @@ def load_360Loc_data(batch_size, stage='train'):
         area: same | cross
     """
 
-    Loc360 = Dataset360Loc(stage = stage)
+    Loc360 = Dataset360Loc(stage=stage)
 
-    if stage == 'train':
+    if stage == "train":
         seed = 1234
-        shuffle = True
         persistent_workers = True
-    elif stage == 'val':
+    elif stage == "val":
         seed = 3456
-        shuffle = False
         persistent_workers = True
-    elif stage == 'test':
+    elif stage == "test":
         seed = 2345
-        shuffle = False
         persistent_workers = False
     else:
         seed = 6789
-        shuffle = False
         persistent_workers = True
 
     dataloader = DataLoader(
-        Loc360, 
+        Loc360,
         batch_size=batch_size,
         num_workers=1,
         generator=get_generator(seed),
         worker_init_fn=worker_init_fn,
         persistent_workers=persistent_workers,
-        shuffle=False
+        shuffle=False,
     )
-    # val_dataloader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
     return dataloader
-
-def ply_post_opencv(data):
-    # 提取每一张图片的平移向量（最后一列）
-    camera_positions = data[:, :, 3].numpy()
-
-    # 提取 X 和 Y 坐标
-    x = camera_positions[:, 0]
-    y = camera_positions[:, 2]
-
-    # 创建一个 2D 绘图
-    plt.figure()
-
-    # 绘制相机轨迹
-    plt.plot(x, y, marker='o', color='b', label='Camera Trajectory')
-    # 设置 X 和 Y 坐标轴比例一致
-    plt.axis('equal')
-    # 添加标签和标题
-    plt.xlabel('X Position')
-    plt.ylabel('Y Position')
-    plt.title('Camera Movement in XY Plane')
-    plt.legend()
-
-    # 如果需要保存图形，可以使用以下命令
-    plt.savefig("camera_trajectory_xy1.png", dpi=300)
-    plt.close()
-
-def ply_post(data):
-    # 提取每一张图片的平移向量（最后一列）
-    camera_positions = data[:, :, 3].numpy()
-
-    # 提取 X 和 Y 坐标
-    x = camera_positions[:, 0]
-    y = camera_positions[:, 1]
-
-    # 创建一个 2D 绘图
-    plt.figure()
-
-    # 绘制相机轨迹
-    plt.plot(x, y, marker='o', color='b', label='Camera Trajectory')
-    # 设置 X 和 Y 坐标轴比例一致
-    plt.axis('equal')
-    # 添加标签和标题
-    plt.xlabel('X Position')
-    plt.ylabel('Y Position')
-    plt.title('Camera Movement in XY Plane')
-    plt.legend()
-
-    # 如果需要保存图形，可以使用以下命令
-    plt.savefig("camera_trajectory_xy2.png", dpi=300)
-    plt.close()

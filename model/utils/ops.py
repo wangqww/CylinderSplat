@@ -1,9 +1,9 @@
+"""Tensor, ray and camera-projection utilities shared by the models and loaders."""
+
 import math
 from collections import defaultdict
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -22,9 +22,7 @@ def reflect(x, n):
 ValidScale = Union[Tuple[float, float], Num[Tensor, "2 D"]]
 
 
-def scale_tensor(
-    dat: Num[Tensor, "... D"], inp_scale: ValidScale, tgt_scale: ValidScale
-):
+def scale_tensor(dat: Num[Tensor, "... D"], inp_scale: ValidScale, tgt_scale: ValidScale):
     if inp_scale is None:
         inp_scale = (0, 1)
     if tgt_scale is None:
@@ -116,22 +114,14 @@ def chunk_batch(func: Callable, chunk_size: int, *args, **kwargs) -> Any:
         if isinstance(arg, torch.Tensor):
             B = arg.shape[0]
             break
-    assert (
-        B is not None
-    ), "No tensor found in args or kwargs, cannot determine batch size."
+    assert B is not None, "No tensor found in args or kwargs, cannot determine batch size."
     out = defaultdict(list)
     out_type = None
     # max(1, B) to support B == 0
     for i in range(0, max(1, B), chunk_size):
         out_chunk = func(
-            *[
-                arg[i : i + chunk_size] if isinstance(arg, torch.Tensor) else arg
-                for arg in args
-            ],
-            **{
-                k: arg[i : i + chunk_size] if isinstance(arg, torch.Tensor) else arg
-                for k, arg in kwargs.items()
-            },
+            *[arg[i : i + chunk_size] if isinstance(arg, torch.Tensor) else arg for arg in args],
+            **{k: arg[i : i + chunk_size] if isinstance(arg, torch.Tensor) else arg for k, arg in kwargs.items()},
         )
         if out_chunk is None:
             continue
@@ -144,9 +134,7 @@ def chunk_batch(func: Callable, chunk_size: int, *args, **kwargs) -> Any:
         elif isinstance(out_chunk, dict):
             pass
         else:
-            print(
-                f"Return value of func must be in type [torch.Tensor, list, tuple, dict], get {type(out_chunk)}."
-            )
+            print(f"Return value of func must be in type [torch.Tensor, list, tuple, dict], get {type(out_chunk)}.")
             exit(1)
         for k, v in out_chunk.items():
             v = v if torch.is_grad_enabled() else v.detach()
@@ -208,9 +196,7 @@ def get_ray_directions(
         indexing="xy",
     )
 
-    directions: Float[Tensor, "H W 3"] = torch.stack(
-        [(i - cx) / fx, -(j - cy) / fy, -torch.ones_like(i)], -1
-    )
+    directions: Float[Tensor, "H W 3"] = torch.stack([(i - cx) / fx, -(j - cy) / fy, -torch.ones_like(i)], -1)
 
     return directions
 
@@ -234,20 +220,14 @@ def get_rays(
     elif directions.ndim == 3:  # (H, W, 3)
         assert c2w.ndim in [2, 3]
         if c2w.ndim == 2:  # (4, 4)
-            rays_d = (directions[:, :, None, :] * c2w[None, None, :3, :3]).sum(
-                -1
-            )  # (H, W, 3)
+            rays_d = (directions[:, :, None, :] * c2w[None, None, :3, :3]).sum(-1)  # (H, W, 3)
             rays_o = c2w[None, None, :3, 3].expand(rays_d.shape)
         elif c2w.ndim == 3:  # (B, 4, 4)
-            rays_d = (directions[None, :, :, None, :] * c2w[:, None, None, :3, :3]).sum(
-                -1
-            )  # (B, H, W, 3)
+            rays_d = (directions[None, :, :, None, :] * c2w[:, None, None, :3, :3]).sum(-1)  # (B, H, W, 3)
             rays_o = c2w[:, None, None, :3, 3].expand(rays_d.shape)
     elif directions.ndim == 4:  # (B, H, W, 3)
         assert c2w.ndim == 3  # (B, 4, 4)
-        rays_d = (directions[:, :, :, None, :] * c2w[:, None, None, :3, :3]).sum(
-            -1
-        )  # (B, H, W, 3)
+        rays_d = (directions[:, :, :, None, :] * c2w[:, None, None, :3, :3]).sum(-1)  # (B, H, W, 3)
         rays_o = c2w[:, None, None, :3, 3].expand(rays_d.shape)
 
     # add camera noise to avoid grid-like artifect
@@ -279,9 +259,7 @@ def get_projection_matrix(
     return proj_mtx
 
 
-def get_mvp_matrix(
-    c2w: Float[Tensor, "B 4 4"], proj_mtx: Float[Tensor, "B 4 4"]
-) -> Float[Tensor, "B 4 4"]:
+def get_mvp_matrix(c2w: Float[Tensor, "B 4 4"], proj_mtx: Float[Tensor, "B 4 4"]) -> Float[Tensor, "B 4 4"]:
     # calculate w2c from c2w: R' = Rt, t' = -Rt * t
     # mathematically equivalent to (c2w)^-1
     w2c: Float[Tensor, "B 4 4"] = torch.zeros(c2w.shape[0], 4, 4).to(c2w)
@@ -293,9 +271,7 @@ def get_mvp_matrix(
     return mvp_mtx
 
 
-def get_full_projection_matrix(
-    c2w: Float[Tensor, "B 4 4"], proj_mtx: Float[Tensor, "B 4 4"]
-) -> Float[Tensor, "B 4 4"]:
+def get_full_projection_matrix(c2w: Float[Tensor, "B 4 4"], proj_mtx: Float[Tensor, "B 4 4"]) -> Float[Tensor, "B 4 4"]:
     return (c2w.unsqueeze(0).bmm(proj_mtx.unsqueeze(0))).squeeze(0)
 
 
@@ -334,12 +310,12 @@ def get_projection_matrix_gaussian(znear, zfar, fovX, fovY, device="cuda"):
 def get_projection_matrix_gaussian_lgm(znear, zfar, fovX, fovY, device="cuda"):
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
-    
+
     P = torch.zeros(4, 4, device=device)
     P[0, 0] = 1.0 / tanHalfFovX
     P[1, 1] = 1.0 / tanHalfFovY
     P[2, 2] = (zfar + znear) / (zfar - znear)
-    P[3, 2] = - (zfar * znear) / (zfar - znear)
+    P[3, 2] = -(zfar * znear) / (zfar - znear)
     P[2, 3] = 1
 
     return P
@@ -354,21 +330,17 @@ def get_fov_gaussian(P):
 
 
 def get_cam_info_gaussian(c2w, fovx, fovy, znear, zfar):
-    # c2w = convert_pose(c2w)
     world_view_transform = torch.inverse(c2w.float())
 
     world_view_transform = world_view_transform.transpose(0, 1).cuda().float()
     projection_matrix = (
-        get_projection_matrix_gaussian(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy)
-        .transpose(0, 1)
-        .cuda()
+        get_projection_matrix_gaussian(znear=znear, zfar=zfar, fovX=fovx, fovY=fovy).transpose(0, 1).cuda()
     ).float()
-    full_proj_transform = (
-        world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))
-    ).squeeze(0).float()
+    full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0).float()
     camera_center = world_view_transform.inverse()[3, :3]
 
     return world_view_transform, full_proj_transform, camera_center
+
 
 def binary_cross_entropy(input, target):
     """
@@ -377,17 +349,13 @@ def binary_cross_entropy(input, target):
     return -(target * torch.log(input) + (1 - target) * torch.log(1 - input)).mean()
 
 
-def tet_sdf_diff(
-    vert_sdf: Float[Tensor, "Nv 1"], tet_edges: Integer[Tensor, "Ne 2"]
-) -> Float[Tensor, ""]:
+def tet_sdf_diff(vert_sdf: Float[Tensor, "Nv 1"], tet_edges: Integer[Tensor, "Ne 2"]) -> Float[Tensor, ""]:
     sdf_f1x6x2 = vert_sdf[:, 0][tet_edges.reshape(-1)].reshape(-1, 2)
     mask = torch.sign(sdf_f1x6x2[..., 0]) != torch.sign(sdf_f1x6x2[..., 1])
     sdf_f1x6x2 = sdf_f1x6x2[mask]
     sdf_diff = F.binary_cross_entropy_with_logits(
         sdf_f1x6x2[..., 0], (sdf_f1x6x2[..., 1] > 0).float()
-    ) + F.binary_cross_entropy_with_logits(
-        sdf_f1x6x2[..., 1], (sdf_f1x6x2[..., 0] > 0).float()
-    )
+    ) + F.binary_cross_entropy_with_logits(sdf_f1x6x2[..., 1], (sdf_f1x6x2[..., 0] > 0).float())
     return sdf_diff
 
 
@@ -404,10 +372,9 @@ def perpendicular_component(x: Float[Tensor, "B C H W"], y: Float[Tensor, "B C H
     eps = torch.ones_like(x[:, 0, 0, 0]) * 1e-6
     return (
         x
-        - (
-            torch.mul(x, y).sum(dim=[1, 2, 3])
-            / torch.maximum(torch.mul(y, y).sum(dim=[1, 2, 3]), eps)
-        ).view(-1, 1, 1, 1)
+        - (torch.mul(x, y).sum(dim=[1, 2, 3]) / torch.maximum(torch.mul(y, y).sum(dim=[1, 2, 3]), eps)).view(
+            -1, 1, 1, 1
+        )
         * y
     )
 
@@ -419,23 +386,24 @@ def validate_empty_rays(ray_indices, t_start, t_end):
         t_end = torch.Tensor([0]).to(ray_indices)
     return ray_indices, t_start, t_end
 
+
 def get_panorama_ray_directions(
     H: int,
     W: int,
-):  
+):
     # 创建 theta 和 phi 为 1D 张量
     theta = torch.linspace(0, 2 * torch.pi, W)  # 方位角 [0, 2π]
-    phi = torch.linspace(0, torch.pi, H)       # 仰角 [0, π]
-    
+    phi = torch.linspace(0, torch.pi, H)  # 仰角 [0, π]
+
     # 生成网格，调整 indexing='ij' 确保符合 PyTorch 约定
-    phi, theta = torch.meshgrid(phi, theta, indexing='ij')
+    phi, theta = torch.meshgrid(phi, theta, indexing="ij")
 
     # 计算 OpenCV 形式的 X, Y, Z 坐标
-    x = -torch.sin(phi) * torch.sin(theta)   # OpenCV X: 右
-    y = -torch.cos(phi)                     # OpenCV Y: 下
+    x = -torch.sin(phi) * torch.sin(theta)  # OpenCV X: 右
+    y = -torch.cos(phi)  # OpenCV Y: 下
     z = -torch.sin(phi) * torch.cos(theta)  # OpenCV Z: 前
 
     # 将 x, y, z 堆叠在一起，并调整维度 (height, width, 3)
     directions = torch.stack((x, y, z), dim=-1)  # (B, H, W, 3)
-    
+
     return directions

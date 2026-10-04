@@ -1,23 +1,14 @@
-"""tools/prepare_unik3d_depth.py: output layout, view listing and the link-safe writes (no UniK3D needed)."""
+"""tools/prepare_unik3d_depth.py: output layout, view listing and link-safe writes (no UniK3D needed)."""
 
-import importlib.util
 import os
 
 import numpy as np
 import pytest
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import load_by_path
 
-
-def _load_tool():
-    spec = importlib.util.spec_from_file_location(
-        "prepare_unik3d_depth", os.path.join(REPO_ROOT, "tools", "prepare_unik3d_depth.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-tool = _load_tool()
+pytest.importorskip("torch")
+tool = load_by_path("tools/prepare_unik3d_depth.py", "prepare_unik3d_depth")
 
 
 def test_safe_save_replaces_a_hard_link_without_touching_the_other_name(tmp_path):
@@ -44,12 +35,6 @@ def test_safe_save_refuses_a_symlinked_directory(tmp_path):
     assert not os.listdir(target)
 
 
-def test_safe_save_refuses_a_protected_tree():
-    from tools.write_guard import ProtectedPathError
-    with pytest.raises(ProtectedPathError):
-        tool.safe_save("/data/qiwei/nips25/pano_grf/x/depth_metric.npy", np.ones(3))
-
-
 def test_mp3d_listing_skips_ds_store_like_the_loaders(tmp_path):
     root = tmp_path / "png_render_test_1024x512_seq_len_3_m3d_dist_0.5"
     for scene in ("00", "01"):
@@ -59,7 +44,8 @@ def test_mp3d_listing_skips_ds_store_like_the_loaders(tmp_path):
     (root / "00" / ".DS_Store").write_bytes(b"")
     images = tool.mp3d_images(tmp_path, ["test"])
     assert [str(p.relative_to(root)) for p in images] == [
-        f"{s}/{v}/rgb.png" for s in ("00", "01") for v in ("00", "01", "02")]
+        f"{s}/{v}/rgb.png" for s in ("00", "01") for v in ("00", "01", "02")
+    ]
 
 
 def test_output_layout_matches_the_loaders(tmp_path):

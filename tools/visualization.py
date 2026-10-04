@@ -1,17 +1,18 @@
-import cv2
+"""Colormap helpers for depth maps."""
+
 import numpy as np
 
 import matplotlib
 import matplotlib.cm
 
 
-def gray_to_colormap(img, cmap='plasma', max_val=None):
+def gray_to_colormap(img, cmap="plasma", max_val=None):
     """
     Transfer gray map to matplotlib colormap
     """
     assert img.ndim == 2
 
-    img[img<0] = 0
+    img[img < 0] = 0
     mask_invalid = img < 1e-10
     if max_val is None:
         img = img / (img.max() + 1e-8)
@@ -23,6 +24,7 @@ def gray_to_colormap(img, cmap='plasma', max_val=None):
     colormap = (map.to_rgba(img)[:, :, :3] * 255).astype(np.uint8)
     colormap[mask_invalid] = 0
     return colormap
+
 
 def depths_to_colors(depths, concat="width", max_val=None):
     colors = []

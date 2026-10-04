@@ -1,19 +1,10 @@
-"""Evaluation table for evaluate.py: one row per legacy evaluate_*.py script.
+"""Evaluation rows for evaluate.py (--dataset).
 
-Each row reproduces one script in legacy/ (the released code at f7b20b9):
-which loader and split it reads, where its batch size comes from, which
-scene keys it reports, which metrics it computes and prints, how it
-loads a checkpoint, and whether it can write PLY files. Three rows are
-derived from mp3d_double_256 instead: its validation split
-(mp3d_double_256_val) and the stage-4 rows on the 512x1024 loader
-(mp3d_double_512_full, mp3d_double_512_full_val; legacy_script None).
-loc360_double_256_da is loc360_double_256 with the Depth Anywhere PCC
-reference (legacy_script None).
-The line formats are the legacy ones with two changes:
-WS-PSNR is labelled `wspsnr` in every line (the 512 script printed it as
-`psnr`, the 360Loc script as `ws_psnr`), and the mislabelled Total line of
-the MP3D 256 scripts gets the missing `wspsnr` placeholder. The per-scene
-line of `mp3d_double_256` is the REF-T1 line, byte for byte.
+Each row fixes which loader and split are read, where the batch size comes
+from, which scene keys are reported, which metrics are computed and printed
+(the per-batch, per-scene and Total line formats), how a checkpoint is loaded,
+and whether PLY files can be written. Every line prints each value under its
+own label; WS-PSNR is always labelled `wspsnr`.
 
 Metric names (tools/metrics.py):
   psnr    plain PSNR of images clipped to [0, 1] (compute_psnr)
@@ -25,7 +16,7 @@ Metric names (tools/metrics.py):
   pcc     Pearson correlation of the rendered depth with gts['depth']
   abs, silog, rmse, delta1..3
           depth vs the real GT depth (gts['depth_gt']) under gts['mask_gt'],
-          unaligned (the legacy median alignment was computed and discarded)
+          unaligned (evaluate.py --align-depth adds median-aligned columns)
   depthsim
           seam continuity of the rendered depth (left vs right image edge)
 
@@ -56,8 +47,6 @@ _FULL_SCENE_LINE = (
     " {} psnr: {:.3f}, wspsnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}, pcc: {:.4f}, abs: {:.4f}, "
     "silog: {:.4f}, rmse: {:.4f}, delta1: {:.4f}, delta2: {:.4f}, delta3: {:.4f}, depthsim: {:.4f}"
 )
-# Legacy :603 had no `wspsnr: {:.3f}, ` and so printed every value from ssim on
-# under the previous label and dropped depthsim; this is the only change.
 _FULL_TOTAL_LINE = (
     "Finish evluation ({:d} s). Total psnr: {:.3f}, wspsnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}, "
     "pcc: {:.4f}, abs: {:.4f}, silog: {:.4f}, rmse: {:.4f}, delta1: {:.4f}, delta2: {:.4f}, "
@@ -68,9 +57,8 @@ _IMAGE_METRICS = ("psnr", "wspsnr", "ssim", "lpips", "pcc")
 _IMAGE_BATCH_LINE = "[Eval] Batch %d-%d: psnr: %.3f, wspsnr: %.3f, ssim: %.4f, lpips: %.4f, pcc: %.4f"
 
 
-def _mp3d_256(legacy_script, loader_module, context_views, novel_views, example_config):
+def _mp3d_256(loader_module, context_views, novel_views, example_config):
     return dict(
-        legacy_script=legacy_script,
         loader=(loader_module, "load_MP3D_data"),
         stage="test",
         batch_size_key="batch_size_test",
@@ -86,7 +74,6 @@ def _mp3d_256(legacy_script, loader_module, context_views, novel_views, example_
         batch_line=_FULL_BATCH_LINE,
         scene_line=_FULL_SCENE_LINE,
         total_line=_FULL_TOTAL_LINE,
-        legacy_labels={},
         load="filter",
         summary="table",
         vis_name="Batch_{}_Sampe_{}_Scene_{}",
@@ -96,10 +83,9 @@ def _mp3d_256(legacy_script, loader_module, context_views, novel_views, example_
 
 
 EVAL_ENTRIES = {
-    # REF-T1: configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_256.py on
-    # .../omni_gs_160x320_mp3d_cylinder_double_all_256/checkpoint-48000.
+    # MP3D two-view test sets at 256x512 (stages 1-3), context [0, 2].
     "mp3d_double_256": _mp3d_256(
-        "legacy/evaluate_mp3d_double_256.py", "data.mp3d_dataloader_double_256",
+        "data.mp3d_dataloader_double_256",
         context_views=(0, 2), novel_views=(1,),
         example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_256.py",
     ),
@@ -109,7 +95,7 @@ EVAL_ENTRIES = {
     # name/distance, so every validation scene is labelled m3d_0.1 although the baseline is 1.0 m.
     "mp3d_double_256_val": dict(
         _mp3d_256(
-            "legacy/evaluate_mp3d_double_256.py", "data.mp3d_dataloader_double_256",
+            "data.mp3d_dataloader_double_256",
             context_views=(0, 2), novel_views=(1,),
             example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_256.py",
         ),
@@ -118,7 +104,7 @@ EVAL_ENTRIES = {
     ),
     # One input view (context [1]); the model must be built with num_frames=1.
     "mp3d_single_256": _mp3d_256(
-        "legacy/evaluate_mp3d_single_256.py", "data.mp3d_dataloader_single_256",
+        "data.mp3d_dataloader_single_256",
         context_views=(1,), novel_views=(0, 2),
         example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_pixel_256_single.py",
     ),
@@ -126,31 +112,28 @@ EVAL_ENTRIES = {
     # mp3d_double_256_val on the 512x1024 loader, nothing else changed: the full metric set
     # (PSNR, WS-PSNR, SSIM, LPIPS, per-view PCC, depth metrics), the three-frame protocol with
     # context [0, 2], batch_size_test, the same scene keys. The model is all_256 built at
-    # resolution = [512, 1024] (the stage-4 config), not example_config as it stands.
-    # legacy_script is None: no released script computes these numbers. The 512 script
-    # (legacy/evaluate_mp3d_double_512.py, reproduced by the mp3d_double_512 row below) reports a
-    # reduced set (no plain PSNR, no depth metrics, PCC pooled over views), and no frozen reference
-    # in repro/ pairs with these rows (--check-ref compares the dataset row by name).
+    # resolution = [512, 1024] (the stage-4 config). The mp3d_double_512 row below reports a
+    # reduced set instead (no plain PSNR, no depth metrics, PCC pooled over views).
     "mp3d_double_512_full": _mp3d_256(
-        None, "data.mp3d_dataloader_double_512",
+        "data.mp3d_dataloader_double_512",
         context_views=(0, 2), novel_views=(1,),
-        example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_256.py",
+        example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_512x1024.py",
     ),
     # Stage-4 model selection on the MP3D validation split at 512x1024. As in
     # mp3d_double_256_val, the loader pairs its single validation root with the first test set's
     # name/distance, so every validation scene is labelled m3d_0.1 although the baseline is 1.0 m.
     "mp3d_double_512_full_val": dict(
         _mp3d_256(
-            None, "data.mp3d_dataloader_double_512",
+            "data.mp3d_dataloader_double_512",
             context_views=(0, 2), novel_views=(1,),
-            example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_256.py",
+            example_config="configs/OmniScene/omni_gs_160x320_mp3d_cylinder_all_512x1024.py",
         ),
         stage="val",
         scene_keys=("m3d_0.1",),
     ),
-    # 512x1024. The legacy script printed WS-PSNR as `psnr` and computes no plain PSNR.
+    # MP3D two-view test sets at 512x1024 (the all_512 / pixel_512 models): WS-PSNR, SSIM, LPIPS
+    # and PCC pooled over views; no plain PSNR, no depth metrics.
     "mp3d_double_512": dict(
-        legacy_script="legacy/evaluate_mp3d_double_512.py",
         loader=("data.mp3d_dataloader_double_512", "load_MP3D_data"),
         stage="test",
         batch_size_key="batch_size_test",
@@ -166,7 +149,6 @@ EVAL_ENTRIES = {
         batch_line="[Eval] Batch %d-%d: wspsnr: %.3f, ssim: %.4f, lpips: %.4f, pcc: %.4f",
         scene_line=" {} wspsnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}.",
         total_line="Finish evluation ({:d} s). Total wspsnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}, pcc: {:.4f}.",
-        legacy_labels={"wspsnr": "psnr"},
         load="filter",
         summary="n_params",
         vis_name="Batch_{}_Sampe_{}_Scene_{}",
@@ -176,9 +158,8 @@ EVAL_ENTRIES = {
     # 360Loc 256x512 on the 'val' split (atrium), batch_size_train, no scene keys
     # (the batches carry none), totals only. Targets are four consecutive frames
     # [l, l+1, l+2, l+3] with context [l, l+3], so the novel views are the two
-    # interior frames (loc360_dataloader_double_all_512.py:91-99).
+    # interior frames (see Dataset360Loc in data/loc360_dataloader_double_all_512.py).
     "loc360_double_256": dict(
-        legacy_script="legacy/evaluate_360Loc_double_256.py",
         loader=("data.loc360_dataloader_double_all_512", "load_360Loc_data"),
         stage="val",
         batch_size_key="batch_size_train",
@@ -195,22 +176,19 @@ EVAL_ENTRIES = {
         scene_line=None,
         total_line=("Finish evluation ({:d} s). Total psnr: {:.3f}, wspsnr: {:.3f}, ssim: {:.4f}, "
                     "lpips: {:.4f}, pcc: {:.4f}."),
-        legacy_labels={"wspsnr": "ws_psnr"},
-        # The legacy script called accelerator.load_state(strict=False), which also
-        # restores the RNG states saved with the checkpoint.
+        # Loaded with accelerator.load_state(strict=False), which also restores the
+        # RNG states saved with the checkpoint.
         load="accelerate_state",
         summary="n_params",
         vis_name="Batch_{}_Sampe_{}",
-        # No --save-ply: the Pan2 model's preds["gaussian"] holds the per-view pixel
-        # Gaussians ((b v) hw c), not one set per sample, and the legacy script had
-        # its PLY branch commented out (legacy/evaluate_360Loc_double_256.py:186-192).
+        # No --save-ply: the 360Loc model's preds["gaussian"] holds the per-view pixel
+        # Gaussians ((b v) hw c), not one set per sample.
         save_ply=False,
         example_config="configs/OmniScene/omni_gs_160x320_360Loc_cylinder_all_256.py",
     ),
-    # Kansas/VIGOR test list, one scene key. The legacy Total line omits wspsnr
+    # Kansas/VIGOR test list, one scene key. The Total line omits wspsnr
     # (it is still written to metrics.json).
     "vigor_double": dict(
-        legacy_script="legacy/evaluate_VIGOR.py",
         loader=("data.vigor_dataloader_double", "load_VIGOR_data"),
         stage="test",
         batch_size_key="batch_size_test",
@@ -226,7 +204,6 @@ EVAL_ENTRIES = {
         batch_line=_IMAGE_BATCH_LINE,
         scene_line=" {} psnr: {:.3f}, wspsnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}, pcc: {:.4f}",
         total_line="Finish evluation ({:d} s). Total psnr: {:.3f}, ssim: {:.4f}, lpips: {:.4f}, pcc: {:.4f}.",
-        legacy_labels={},
         load="filter",
         summary="table",
         vis_name="Batch_{}_Sampe_{}_Scene_{}",
@@ -237,10 +214,8 @@ EVAL_ENTRIES = {
 
 # 360Loc with the paper's PCC reference: loc360_double_256 (same split, samples, targets, metric
 # code and line formats) on a loader whose outputs['depth'] is the Depth Anywhere pseudo-GT
-# (depthanywhere/*_depth_anywhere.png, read like the 160x320 loader) instead of the UniK3D prior
-# the model receives as input. Only PCC can change. No legacy script reproduces it.
+# (depthanywhere/*_depth_anywhere.png) instead of the UniK3D prior the model receives as input. Only PCC can change.
 EVAL_ENTRIES["loc360_double_256_da"] = dict(
     EVAL_ENTRIES["loc360_double_256"],
-    legacy_script=None,
     loader=("data.loc360_dataloader_da", "load_360Loc_data_da"),
 )

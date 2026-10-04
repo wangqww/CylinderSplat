@@ -1,10 +1,11 @@
+"""Multi-view feature transformer with full and (shifted) window attention between views."""
+
 import torch
 import torch.nn as nn
-from einops import rearrange
 
 from .unimatch.utils import split_feature, merge_splits
 import torch.nn.functional as F
-from .rope import RotaryEmbedding2D, apply_2d_rotary_pos_emb
+from .rope import RotaryEmbedding2D
 
 
 def single_head_full_attention(q, k, v):
@@ -46,15 +47,11 @@ def generate_shift_window_attn_mask(
             img_mask[:, h, w, :] = cnt
             cnt += 1
 
-    mask_windows = split_feature(
-        img_mask, num_splits=input_resolution[-1] // window_size_w, channel_last=True
-    )
+    mask_windows = split_feature(img_mask, num_splits=input_resolution[-1] // window_size_w, channel_last=True)
 
     mask_windows = mask_windows.view(-1, window_size_h * window_size_w)
     attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
-        attn_mask == 0, float(0.0)
-    )
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
 
     return attn_mask
 
@@ -92,8 +89,6 @@ def single_head_split_window_attention(
         k = k.view(b, m, h, w, c)  # [B, N-1, H, W, C]
         v = v.view(b, m, h, w, c)
 
-        scale_factor = c**0.5
-
         if with_shift:
             assert attn_mask is not None  # compute once
             shift_size_h = window_size_h // 2
@@ -103,9 +98,7 @@ def single_head_split_window_attention(
             k = torch.roll(k, shifts=(-shift_size_h, -shift_size_w), dims=(2, 3))
             v = torch.roll(v, shifts=(-shift_size_h, -shift_size_w), dims=(2, 3))
 
-        q = split_feature(
-            q, num_splits=num_splits, channel_last=True
-        )  # [B*K*K, H/K, W/K, C]
+        q = split_feature(q, num_splits=num_splits, channel_last=True)  # [B*K*K, H/K, W/K, C]
         k = split_feature(
             k.permute(0, 2, 3, 4, 1).reshape(b, h, w, -1),
             num_splits=num_splits,
@@ -118,14 +111,10 @@ def single_head_split_window_attention(
         )  # [B*K*K, H/K, W/K, C*(N-1)]
 
         k = (
-            k.view(b_new, h // num_splits, w // num_splits, c, m)
-            .permute(0, 3, 1, 2, 4)
-            .reshape(b_new, c, -1)
+            k.view(b_new, h // num_splits, w // num_splits, c, m).permute(0, 3, 1, 2, 4).reshape(b_new, c, -1)
         )  # [B*K*K, C, H/K*W/K*(N-1)]
         v = (
-            v.view(b_new, h // num_splits, w // num_splits, c, m)
-            .permute(0, 1, 2, 4, 3)
-            .reshape(b_new, -1, c)
+            v.view(b_new, h // num_splits, w // num_splits, c, m).permute(0, 1, 2, 4, 3).reshape(b_new, -1, c)
         )  # [B*K*K, H/K*W/K*(N-1), C]
 
         out = F.scaled_dot_product_attention(
@@ -173,9 +162,7 @@ def single_head_split_window_attention(
             k = torch.roll(k, shifts=(-shift_size_h, -shift_size_w), dims=(1, 2))
             v = torch.roll(v, shifts=(-shift_size_h, -shift_size_w), dims=(1, 2))
 
-        q = split_feature(
-            q, num_splits=num_splits, channel_last=True
-        )  # [B*K*K, H/K, W/K, C]
+        q = split_feature(q, num_splits=num_splits, channel_last=True)  # [B*K*K, H/K, W/K, C]
         k = split_feature(k, num_splits=num_splits, channel_last=True)
         v = split_feature(v, num_splits=num_splits, channel_last=True)
 
@@ -262,9 +249,7 @@ def multi_head_split_window_attention(
 
     attn = torch.softmax(scores, dim=-1)  # [B*K*K, N, H/K*W/K, H/K*W/K]
 
-    out = torch.matmul(
-        attn, v.view(b_new, -1, num_head, c // num_head).permute(0, 2, 1, 3)
-    )  # [B*K*K, N, H/K*W/K, C]
+    out = torch.matmul(attn, v.view(b_new, -1, num_head, c // num_head).permute(0, 2, 1, 3))  # [B*K*K, N, H/K*W/K, C]
 
     out = merge_splits(
         out.permute(0, 2, 1, 3).reshape(b_new, h // num_splits, w // num_splits, c),
@@ -355,35 +340,6 @@ class TransformerLayer(nn.Module):
         key = self.k_proj(key)  # [B, L, C] or [B, N-1, L, C]
         value = self.v_proj(value)  # [B, L, C] or [B, N-1, L, C]
 
-
-        # <<< --- 2. 注入RoPE的核心修改 --- >>>
-        # if height is not None and width is not None:
-        #     # 生成RoPE系数
-        #     cos_x, sin_x, cos_y, sin_y = self.rope(height, width, device=query.device)
-
-        #     # 对Query应用RoPE
-        #     # [B, H*W, C] -> [B, H, W, 1, C] (nhead=1)
-        #     query_spatial = query.view(b, height, width, self.nhead, c)
-        #     query = apply_2d_rotary_pos_emb(query_spatial, cos_x, sin_x, cos_y, sin_y)
-        #     query = query.view(b, l, c) # 恢复形状
-
-        #     # 对Key应用RoPE (需要处理多视角的情况)
-        #     if key.dim() == 3: # 2-view or self-attention
-        #         key_spatial = key.view(b, height, width, self.nhead, c)
-        #         key = apply_2d_rotary_pos_emb(key_spatial, cos_x, sin_x, cos_y, sin_y)
-        #         key = key.view(b, l, c)
-        #     elif key.dim() == 4: # multi-view cross-attention [B, M, L, C]
-        #         m = key.shape[1]
-        #         key_spatial = key.view(b, m, height, width, self.nhead, c)
-        #         # RoPE系数需要扩展以匹配多视图维度
-        #         cos_x_mv = cos_x.unsqueeze(1) # [1, 1, H, W, 1, D/2]
-        #         sin_x_mv = sin_x.unsqueeze(1)
-        #         cos_y_mv = cos_y.unsqueeze(1)
-        #         sin_y_mv = sin_y.unsqueeze(1)
-        #         key = apply_2d_rotary_pos_emb(key_spatial, cos_x_mv, sin_x_mv, cos_y_mv, sin_y_mv)
-        #         key = key.view(b, m, l, c)
-
-
         if attn_type == "swin" and attn_num_splits > 1:
             if self.nhead > 1:
                 message = multi_head_split_window_attention(
@@ -401,9 +357,7 @@ class TransformerLayer(nn.Module):
                 if self.add_per_view_attn:
                     assert query.dim() == 3 and key.dim() == 4 and value.dim() == 4
                     b, l, c = query.size()
-                    query = query.unsqueeze(1).repeat(
-                        1, key.size(1), 1, 1
-                    )  # [B, N-1, L, C]
+                    query = query.unsqueeze(1).repeat(1, key.size(1), 1, 1)  # [B, N-1, L, C]
                     query = query.view(-1, l, c)  # [B*(N-1), L, C]
                     key = key.view(-1, l, c)
                     value = value.view(-1, l, c)
@@ -579,9 +533,7 @@ class MultiViewFeatureTransformer(nn.Module):
                     nhead=nhead,
                     attention_type=attention_type,
                     ffn_dim_expansion=ffn_dim_expansion,
-                    with_shift=(
-                        True if attention_type == "swin" and i % 2 == 1 else False
-                    ),
+                    with_shift=(True if attention_type == "swin" and i % 2 == 1 else False),
                     add_per_view_attn=add_per_view_attn,
                     no_cross_attn=no_cross_attn,
                 )
@@ -631,7 +583,7 @@ class MultiViewFeatureTransformer(nn.Module):
                 )
             else:
                 shifted_window_attn_mask = None
-            
+
             # 將特徵從圖像格式 [B, C, H, W] 轉換為序列格式 [B, H*W, C]
             feature = feature.reshape(b, c, -1).permute(0, 2, 1)
 
@@ -641,7 +593,7 @@ class MultiViewFeatureTransformer(nn.Module):
                 # 把 feature 同時作為 source 和 target 傳入
                 feature = layer(
                     feature,
-                    feature[:,None,:,:], # target 與 source 相同
+                    feature[:, None, :, :],  # target 與 source 相同
                     height=h,
                     width=w,
                     shifted_window_attn_mask=shifted_window_attn_mask,
@@ -650,7 +602,7 @@ class MultiViewFeatureTransformer(nn.Module):
 
             # 將特徵從序列格式還原為圖像格式
             feature = feature.view(b, h, w, c).permute(0, 3, 1, 2).contiguous()
-            
+
             # 以列表形式返回，保持輸出格式一致
             return [feature]
 
@@ -674,12 +626,8 @@ class MultiViewFeatureTransformer(nn.Module):
 
             # [N*B, C, H, W], [N*B, N-1, C, H, W]
             concat0, concat1 = batch_features(multi_view_features)
-            concat0 = concat0.reshape(num_views * b, c, -1).permute(
-                0, 2, 1
-            )  # [N*B, H*W, C]
-            concat1 = concat1.reshape(num_views * b, num_views - 1, c, -1).permute(
-                0, 1, 3, 2
-            )  # [N*B, N-1, H*W, C]
+            concat0 = concat0.reshape(num_views * b, c, -1).permute(0, 2, 1)  # [N*B, H*W, C]
+            concat1 = concat1.reshape(num_views * b, num_views - 1, c, -1).permute(0, 1, 3, 2)  # [N*B, N-1, H*W, C]
 
             for i, layer in enumerate(self.layers):
                 concat0 = layer(
@@ -698,8 +646,6 @@ class MultiViewFeatureTransformer(nn.Module):
                     concat0, concat1 = batch_features(features)
 
             features = concat0.chunk(chunks=num_views, dim=0)
-            features = [
-                f.view(b, h, w, c).permute(0, 3, 1, 2).contiguous() for f in features
-            ]
+            features = [f.view(b, h, w, c).permute(0, 3, 1, 2).contiguous() for f in features]
 
             return features

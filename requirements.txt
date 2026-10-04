@@ -12,7 +12,6 @@
 #   3. pytorch3d 0.7.8, built from source
 #        (pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8")
 #   4. this file:  pip install -r requirements.txt
-#        (its --find-links line below gets the torch-scatter wheel from the PyG index)
 #   5. the local CUDA extensions:  pip install --no-build-isolation ./pano_gaussian ./simple-knn
 #      (pano_gaussian needs the glm submodule: git submodule update --init --recursive)
 #
@@ -20,8 +19,6 @@
 # under taming/modules/autoencoder/lpips/ itself.
 
 accelerate==1.5.2
-diffusers==0.32.2
-e3nn==0.5.8
 einops==0.8.1
 imageio==2.37.0
 jaxtyping==0.2.31
@@ -37,18 +34,11 @@ pillow==11.0.0
 plyfile==1.1
 safetensors==0.5.3
 scikit-image==0.25.2
-scikit-learn==1.6.1
 scipy==1.15.2
-torchmetrics==1.6.3
 typeguard==2.13.3
 xformers==0.0.22.post7
-# torch-scatter: the prebuilt wheel for torch 2.1.0 / cu118 from the PyG index (the PyPI
-# sdist would start a long CUDA build, which fails under build isolation)
---find-links https://data.pyg.org/whl/torch-2.1.0+cu118.html
-torch-scatter==2.1.2
 
 # Optional
-#   open3d==0.19.0          feature / point-cloud dumps (vis_feat.py)
 #   pytest==8.3.5           tests/
 # UniK3D (tools/prepare_unik3d_depth.py) needs Python>=3.11 and torch>=2.4, so it gets its
 # own environment (README "Depth prior"). Do not install it into this one.

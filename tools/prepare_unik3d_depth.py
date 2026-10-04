@@ -13,8 +13,9 @@ Output layout (what the loaders read):
 
 Files are written under --out-root, mirroring the dataset tree, so the dataset
 itself is never modified. Merge them into a copy of the dataset afterwards, or
-pass --in-place to write next to the images of a dataset copy that is not a
-protected tree.
+pass --in-place to write next to the images of a dataset copy. Outputs are never
+written through symlinks, and an existing output that is a hard link is replaced
+by a new file, so a linked copy never writes into the original dataset.
 
 Example:
   python tools/prepare_unik3d_depth.py --dataset mp3d --data-root /path/to/pano_grf \
@@ -25,18 +26,21 @@ import argparse
 import json
 import math
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.write_guard import check_write_roots  # noqa: E402
-
-MP3D_SETS = [("m3d", 0.1), ("m3d", 0.25), ("m3d", 0.5), ("m3d", 0.75), ("m3d", 1.0),
-             ("residential", 0.15), ("replica", 0.5)]
+MP3D_SETS = [
+    ("m3d", 0.1),
+    ("m3d", 0.25),
+    ("m3d", 0.5),
+    ("m3d", 0.75),
+    ("m3d", 1.0),
+    ("residential", 0.15),
+    ("replica", 0.5),
+]
 LOC360_LOCATIONS = ["concourse", "hall", "piatrium", "atrium"]
 
 
@@ -96,7 +100,6 @@ def safe_save(path, array):
     directory = os.path.dirname(os.path.abspath(path))
     if os.path.realpath(directory) != directory:
         raise RuntimeError(f"output directory {directory} goes through a symlink")
-    check_write_roots([directory])
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
     try:
@@ -127,8 +130,9 @@ def main():
     parser.add_argument("--dataset", choices=["mp3d", "loc360"], required=True)
     parser.add_argument("--data-root", type=Path, required=True, help="dataset root (read only)")
     parser.add_argument("--out-root", type=Path, help="where the depth files are written (mirrors the dataset tree)")
-    parser.add_argument("--in-place", action="store_true",
-                        help="write next to the images; only for a dataset copy outside the protected trees")
+    parser.add_argument(
+        "--in-place", action="store_true", help="write next to the images; only for a copy of the dataset"
+    )
     parser.add_argument("--stages", nargs="+", default=["train", "val", "test"], help="MP3D splits to process")
     parser.add_argument("--unik3d", default="lpiccinelli/unik3d-vitl", help="UniK3D weights (hub id or local dir)")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -141,9 +145,6 @@ def main():
     out_root = data_root if args.in_place else args.out_root.resolve()
     if not args.in_place and (out_root == data_root or data_root in out_root.parents):
         parser.error("--out-root must be outside --data-root (use --in-place on a dataset copy instead)")
-    # The dataset trees the released models were trained on are protected: an
-    # in-place run there is refused along with any other protected target.
-    check_write_roots([out_root])
 
     images = mp3d_images(data_root, args.stages) if args.dataset == "mp3d" else loc360_images(data_root)
     print(f"{len(images)} panoramas")
@@ -153,11 +154,12 @@ def main():
     # otherwise write through to the original tree. realpath resolves symlinked directories
     # and files alike; symlinked outputs are refused outright.
     outputs = [p for _, d, c in todo for p in (d, c)]
-    check_write_roots(outputs)
     linked = [p for p in outputs if os.path.realpath(p) != os.path.abspath(p)]
     if linked:
-        parser.error(f"{len(linked)} output paths go through symlinks (e.g. {linked[0]}); "
-                     "use a real copy of the dataset or --out-root")
+        parser.error(
+            f"{len(linked)} output paths go through symlinks (e.g. {linked[0]}); "
+            "use a real copy of the dataset or --out-root"
+        )
     if args.skip_existing:
         todo = [t for t in todo if not (t[1].exists() and t[2].exists())]
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -165,7 +167,7 @@ def main():
 
     num_batches = math.ceil(len(todo) / args.batch_size)
     for i in range(num_batches):
-        chunk = todo[i * args.batch_size:(i + 1) * args.batch_size]
+        chunk = todo[i * args.batch_size : (i + 1) * args.batch_size]
         rgb = torch.stack([load_rgb(args.dataset, img) for img, _, _ in chunk], dim=0)
         with torch.no_grad():
             outputs = model.infer(rgb, camera=camera, normalize=True)

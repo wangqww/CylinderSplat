@@ -1,11 +1,10 @@
-"""Weights-only resume with an explicit name / dtype / shape contract (plan A1, "Resume rule").
+"""Weights-only resume with an explicit name / dtype / shape contract.
 
-The legacy trainers loaded `cfg.resume_from` by keeping every checkpoint tensor
-whose name and shape matched the model and silently dropping the rest. Here a
-`model.safetensors` is loaded only when it fits the model exactly, except for
+A `model.safetensors` is loaded only when it fits the model exactly, except for
 the names a named transfer allows to be missing or extra (configs/entries.py,
-TRANSFERS). Only weights are loaded: the optimizer and the scheduler start at
-step 0. The checkpoint is only read, so it may live in a protected tree.
+TRANSFERS); anything else is an error instead of a silently dropped tensor.
+Only weights are loaded: the optimizer and the scheduler start at step 0. The
+checkpoint is only read, never written.
 
 A model name that is absent from the checkpoint but shares its storage with a
 name that is present (tied weights) is not missing: Accelerate's safetensors
@@ -42,8 +41,9 @@ def refuse_source_inside(path, work_dir):
     source_dir = os.path.dirname(real) if os.path.isfile(real) or real.endswith(".safetensors") else real
     work = os.path.realpath(work_dir)
     if _within(source_dir, work) or _within(work, source_dir):
-        raise ResumeError(f"resume checkpoint {path} and the work dir {work_dir} overlap; "
-                          "use a fresh --work-dir / --run-id")
+        raise ResumeError(
+            f"resume checkpoint {path} and the work dir {work_dir} overlap; use a fresh --work-dir / --run-id"
+        )
 
 
 def name_allowed(name, patterns):
@@ -75,8 +75,10 @@ def check_state(state_dict, model_state, allowed_missing=(), allowed_extra=()):
     """
     matched = [k for k in state_dict if k in model_state]
     if not matched:
-        raise ResumeError(f"zero checkpoint tensors match the model ({len(state_dict)} in the checkpoint, "
-                          f"{len(model_state)} in the model)")
+        raise ResumeError(
+            f"zero checkpoint tensors match the model ({len(state_dict)} in the checkpoint, "
+            f"{len(model_state)} in the model)"
+        )
     extra = sorted(k for k in state_dict if k not in model_state)
     absent = sorted(k for k in model_state if k not in state_dict)
     loaded_storage = {_storage_key(model_state[k]) for k in matched}
@@ -90,12 +92,18 @@ def check_state(state_dict, model_state, allowed_missing=(), allowed_extra=()):
     bad_missing = [k for k in missing if not name_allowed(k, allowed_missing)]
     if bad_missing:
         problems.append(_listing("model names missing from the checkpoint", bad_missing))
-    bad_dtype = [f"{k} {state_dict[k].dtype}!={model_state[k].dtype}"
-                 for k in matched if state_dict[k].dtype != model_state[k].dtype]
+    bad_dtype = [
+        f"{k} {state_dict[k].dtype}!={model_state[k].dtype}"
+        for k in matched
+        if state_dict[k].dtype != model_state[k].dtype
+    ]
     if bad_dtype:
         problems.append(_listing("dtype mismatches (checkpoint!=model)", bad_dtype))
-    bad_shape = [f"{k} {tuple(state_dict[k].shape)}!={tuple(model_state[k].shape)}"
-                 for k in matched if state_dict[k].shape != model_state[k].shape]
+    bad_shape = [
+        f"{k} {tuple(state_dict[k].shape)}!={tuple(model_state[k].shape)}"
+        for k in matched
+        if state_dict[k].shape != model_state[k].shape
+    ]
     if bad_shape:
         problems.append(_listing("shape mismatches (checkpoint!=model)", bad_shape))
     if problems:
@@ -106,8 +114,8 @@ def check_state(state_dict, model_state, allowed_missing=(), allowed_extra=()):
 def load_weights_only(model, path, allowed_missing=(), allowed_extra=()):
     """Load model.safetensors into `model` in place (before accelerator.prepare); return the report.
 
-    With a checkpoint that passes the rule, the loaded state equals what the legacy
-    name+shape filter produced from the same file.
+    With a checkpoint that passes the rule, the loaded state equals what a name+shape
+    filter (keep every checkpoint tensor the model has) produces from the same file.
     """
     from safetensors.torch import load_file
 
