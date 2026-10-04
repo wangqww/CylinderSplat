@@ -1,0 +1,3 @@
+[submodule "pano_gaussian/third_party/glm"]
+	path = pano_gaussian/third_party/glm
+	url = https://github.com/g-truc/glm.git

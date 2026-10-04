@@ -27,3 +27,14 @@ checkpoint-100000
 
 # Third-party/model local weights
 model/DepthAnythingV2/
+# =========================
+# Build artefacts (CUDA extensions are built locally, never committed)
+# =========================
+**/build/
+**/*.egg-info/
+*.so
+*.o
+._*
+
+# Run outputs (training/evaluation write under a run directory outside the repo)
+runs/
