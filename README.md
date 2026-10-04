@@ -296,15 +296,15 @@ python evaluate.py --dataset mp3d_double_256      --py-config $O/omni_gs_160x320
 `--out-dir`. The checkpoint must match the model exactly; `--allow-extra PATTERN` skips named extra tensors and
 `--allow-partial` loads with a name-and-shape filter.
 
-| `--dataset` | data | inputs | scored targets | `--novel-only` |
-|---|---|---|---|---|
-| `mp3d_double_256` / `mp3d_double_256_val` | MP3D, Replica, Residential test sets / MP3D validation split, 256×512 | [0, 2] | [0, 1, 2] | [1] |
-| `mp3d_double_512_full` / `mp3d_double_512_full_val` | the same at 512×1024 | [0, 2] | [0, 1, 2] | [1] |
-| `mp3d_double_512` | 512×1024, reduced metric set | [0, 2] | [0, 1, 2] | [1] |
-| `mp3d_single_256` | single view, 256×512 | [1] | [0, 1, 2] | [0, 2] |
-| `loc360_double_256_da` | 360Loc atrium, 256×512; PCC against Depth Anywhere | [0, 3] | [0, 1, 2, 3] | [1, 2] |
-| `loc360_double_256` | the same, PCC against the UniK3D prior | [0, 3] | [0, 1, 2, 3] | [1, 2] |
-| `vigor_double` | Kansas City | [0, 2] | [0, 1, 2] | [1] |
+| `--dataset` | data |
+|---|---|
+| `mp3d_double_256` / `mp3d_double_256_val` | MP3D, Replica, Residential test sets / MP3D validation split, 256×512 |
+| `mp3d_double_512_full` / `mp3d_double_512_full_val` | the same at 512×1024 |
+| `mp3d_double_512` | 512×1024, reduced metric set |
+| `mp3d_single_256` | single view, 256×512 |
+| `loc360_double_256_da` | 360Loc atrium, 256×512; PCC against Depth Anywhere |
+| `loc360_double_256` | the same, PCC against the UniK3D prior |
+| `vigor_double` | Kansas City |
 
 **Protocol.** All frames of a sequence are targets, including the input views; each sample is the mean over its
 targets and each scene the mean over its samples. `--novel-only` scores only the views that are not inputs. The
