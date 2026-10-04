@@ -72,29 +72,47 @@ docker run --gpus all --ipc=host -it -v "$PWD":/workspace -v /path/to/data:/path
 
 ---
 
+## Reproduce the released results
+
+One command downloads the five checkpoints and the evaluation data (about 20 GB, and as much again once
+extracted) from the Hugging Face dataset [`eacsai/CylinderSplat`](https://huggingface.co/datasets/eacsai/CylinderSplat),
+checks their SHA-256, evaluates every checkpoint and prints the metrics next to those this code gives on an
+RTX 4090:
+
+```bash
+bash scripts/reproduce.sh --gpus 0,1,2                                  # evaluations spread over the GPUs
+HF_ENDPOINT=https://hf-mirror.com bash scripts/reproduce.sh --gpus 0    # through the hf-mirror.com mirror
+```
+
+Downloads go to `hf_data/` (`--data-dir`) and results to `workdirs/reproduce/<name>/` (`--out-dir`);
+`--only NAME,...` evaluates some of the checkpoints. A second run skips what is already done. On one RTX 4090
+the five evaluations take about 20 minutes (14 on three GPUs), most of it the 360Loc test set.
+
+---
+
 ## Checkpoints
 
-All files are in the OneDrive folder
-[`dev_release_20261004`](https://1drv.ms/f/c/86d953bfc66eb903/IgCCry9vB7yVTbRvR5QKMIhPAWsS880HvFfSe8ABdaKQKZY).
-Keep its layout, `checkpoints/dev_release_20261004/<name>/model.safetensors`; each `<name>` directory is what
-`evaluate.py --ckpt` and `train.py --resume-from` take.
+The checkpoints are on Hugging Face, `checkpoints/<name>/model.safetensors` of
+[`eacsai/CylinderSplat`](https://huggingface.co/datasets/eacsai/CylinderSplat), and on OneDrive
+([`dev_release_20261004`](https://1drv.ms/f/c/86d953bfc66eb903/IgCCry9vB7yVTbRvR5QKMIhPAWsS880HvFfSe8ABdaKQKZY)).
+Each `<name>` directory is what `evaluate.py --ckpt` and `train.py --resume-from` take.
 
 | `<name>` | model | how it was trained (configs in `configs/OmniScene/`) | checkpoint | download |
 |---|---|---|---|---|
-| `mp3d_stage1_pixel_256x512` | pixel branch, 256×512 | stage 1, `release/stage1_pixel_256_b4.py` | step 24000 (best on the validation split) | [model.safetensors](https://1drv.ms/u/c/86d953bfc66eb903/IQA6TUmSBMNRQp6WLuO2BCD3AaNtZGyFP_jYO_Rhlw0wEL4) |
-| `mp3d_stage2_volume_256x512` | volume branch, 256×512 | stage 2 from stage 1, `release/stage2_volume_256_b4.py` | step 24000 (best on the validation split) | [model.safetensors](https://1drv.ms/u/c/86d953bfc66eb903/IQBYPWqJO81rS7U3N0vzZfOaAZzo2wOmxVn4cQGfMgtt9LA) |
-| `mp3d_stage3_joint_256x512` | joint model, 256×512 | stage 3 from stage 2, `release/stage3_all_256.py` | step 78000 (best on the validation split) | [model.safetensors](https://1drv.ms/u/c/86d953bfc66eb903/IQDhstJnrudiQLWJ4RVIianaAbsqTMbhatRobwcAxVh2kqk) |
-| `mp3d_stage4_joint_512x1024` | joint model, 512×1024 | stage 4 from stage 3, `omni_gs_160x320_mp3d_cylinder_all_512x1024.py` (run stopped at step 44000 of 50000) | step 21000 | [model.safetensors](https://1drv.ms/u/c/86d953bfc66eb903/IQBpTaG90iA0S7v0ZOJXg2OkARgXpk5pPwCFZ-lo_9P1DPQ) |
-| `loc360_finetune_256x512` | 360Loc model, 256×512 | fine-tuned from stage 3, `release/loc360_finetune_256.py` | the final weights (step 21670) | [model.safetensors](https://1drv.ms/u/c/86d953bfc66eb903/IQAddPv-EkKyQKNV66dYBCueAd5z6pSQyS9rXZSSZbb8VEw) |
+| `mp3d_stage1_pixel_256x512` | pixel branch, 256×512 | stage 1, `release/stage1_pixel_256_b4.py` | step 24000 (best on the validation split) | [HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/mp3d_stage1_pixel_256x512/model.safetensors) · [OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQA6TUmSBMNRQp6WLuO2BCD3AaNtZGyFP_jYO_Rhlw0wEL4) |
+| `mp3d_stage2_volume_256x512` | volume branch, 256×512 | stage 2 from stage 1, `release/stage2_volume_256_b4.py` | step 24000 (best on the validation split) | [HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/mp3d_stage2_volume_256x512/model.safetensors) · [OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQBYPWqJO81rS7U3N0vzZfOaAZzo2wOmxVn4cQGfMgtt9LA) |
+| `mp3d_stage3_joint_256x512` | joint model, 256×512 | stage 3 from stage 2, `release/stage3_all_256.py` | step 78000 (best on the validation split) | [HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/mp3d_stage3_joint_256x512/model.safetensors) · [OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQDhstJnrudiQLWJ4RVIianaAbsqTMbhatRobwcAxVh2kqk) |
+| `mp3d_stage4_joint_512x1024` | joint model, 512×1024 | stage 4 from stage 3, `omni_gs_160x320_mp3d_cylinder_all_512x1024.py` (run stopped at step 44000 of 50000) | step 21000 | [HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/mp3d_stage4_joint_512x1024/model.safetensors) · [OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQBpTaG90iA0S7v0ZOJXg2OkARgXpk5pPwCFZ-lo_9P1DPQ) |
+| `loc360_finetune_256x512` | 360Loc model, 256×512 | fine-tuned from stage 3, `release/loc360_finetune_256.py` | the final weights (step 21670) | [HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/loc360_finetune_256x512/model.safetensors) · [OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQAddPv-EkKyQKNV66dYBCueAd5z6pSQyS9rXZSSZbb8VEw) |
 
-SHA-256 of every file: [`SHA256SUMS`](https://1drv.ms/u/c/86d953bfc66eb903/IQCz_-zkkTOBRKfRmvHDpJptAY6_gGv4YIqOqmxWMxR7fPw).
+SHA-256 of every file: [`SHA256SUMS`](https://huggingface.co/datasets/eacsai/CylinderSplat/blob/main/SHA256SUMS).
 
-**Training stage 1** needs the PanSplat checkpoint
-[`pansplat_last.ckpt`](https://1drv.ms/u/c/86d953bfc66eb903/IQC8bZhj4FWPRJt9U5c0KrmlAR9-KBSQfIIXZWrYh8cOR7c?e=dPhQCt)
-(the author's PanSplat run at 256×512; SHA-256 `05b893817f9605d228db20221fbf7b983b35ef9f0473b255afd8409b58782cd1`):
-the pixel model (`OmniGaussianCylinderPixel`) initialises its backbone from it when it is built, also for
-evaluation. Set `backbone_ckpt='/path/to/pansplat_last.ckpt'` in `model = dict(...)` of the pixel configs
-(`omni_gs_160x320_mp3d_cylinder_pixel*.py`, `omni_gs_160x320_VIGOR_cylinder_pixel*.py`).
+**The pixel model** (`OmniGaussianCylinderPixel`, stage 1) initialises its backbone from the PanSplat checkpoint
+`pansplat_last.ckpt` (the author's PanSplat run at 256×512; SHA-256
+`05b893817f9605d228db20221fbf7b983b35ef9f0473b255afd8409b58782cd1`) whenever it is built, also for evaluation:
+[HF](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/checkpoints/pansplat_backbone/pansplat_last.ckpt) ·
+[OneDrive](https://1drv.ms/u/c/86d953bfc66eb903/IQC8bZhj4FWPRJt9U5c0KrmlAR9-KBSQfIIXZWrYh8cOR7c?e=dPhQCt).
+Point `CYLINDERSPLAT_PANSPLAT_CKPT` at it (or set `backbone_ckpt=` in `model = dict(...)` of the pixel configs).
 
 ---
 
@@ -105,31 +123,38 @@ evaluation. Set `backbone_ckpt='/path/to/pansplat_last.ckpt'` in `model = dict(.
    (`pano_grf_lr.tar`: the Matterport3D, Replica and Residential renders) and *360Loc Data* (the official 360Loc
    release).
 2. **Derived depth.** The loaders also read a UniK3D depth prior and the Depth Anywhere depth that serves as the
-   PCC reference; neither comes with those downloads. The `depth/` subfolder of the checkpoint folder holds the
-   author's files. Extract each archive inside its dataset root:
+   PCC reference; neither comes with those downloads. The Hugging Face dataset
+   [`eacsai/CylinderSplat`](https://huggingface.co/datasets/eacsai/CylinderSplat) holds the author's files
+   (SHA-256 in its `SHA256SUMS`). Extract each archive inside its dataset root:
 
    | archive | contents | needed for |
    |---|---|---|
-   | [`pano_grf_evalsets_depth.tar`](https://1drv.ms/u/c/86d953bfc66eb903/IQDm8ob5GRE4Q7QejEQELow6AX9HFExXjL5C1dJ0DRlFK9o) (2.2 GB) | test and val sets: `depth_anywhere.png`, `depth_metric.npy`, `depth_conf.npy` per view | evaluation, checkpoint selection |
-   | [`pano_grf_train_depth_anywhere.tar`](https://1drv.ms/u/c/86d953bfc66eb903/IQCA1xVgPHK2TagBQ0C3dJxfAUNEBgwI1beo-L1sbKGveK0) (3.4 GB) | train set: `depth_anywhere.png` per view | MP3D training |
-   | [`360Loc_atrium_depth.tar`](https://1drv.ms/u/c/86d953bfc66eb903/IQDGQ7ri97nDRr31a7Km2z1_AdclbMEfpN1vBaNiLP_Kyn0) (11.4 GB) | atrium (the test scene): `depth_metric/`, `depthanywhere/` | 360Loc evaluation |
-   | [`360Loc_train_depth_anywhere.tar`](https://1drv.ms/u/c/86d953bfc66eb903/IQD9he-4Yf_rRZMa8lV6LJmbAZNXm9I93JpHB5olfC-NyAc) (0.5 GB) | concourse, hall, piatrium: `depthanywhere/` | not read by training (completeness) |
+   | [`eval/pano_grf_evalsets_depth.tar`](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/eval/pano_grf_evalsets_depth.tar) (2.2 GB) | test and val sets: `depth_anywhere.png`, `depth_metric.npy`, `depth_conf.npy` per view | evaluation, checkpoint selection |
+   | [`eval/360Loc_atrium_depth.tar`](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/eval/360Loc_atrium_depth.tar) (11.4 GB) | atrium (the test scene): `depth_metric/`, `depthanywhere/` | 360Loc evaluation |
+   | [`train/pano_grf_train_unik3d.part00.tar.xz`](https://huggingface.co/datasets/eacsai/CylinderSplat/tree/main/train) … `part09` (146 GB) | train set: `depth_metric.npy`, `depth_conf.npy` per view, 2000 scenes per part | MP3D training |
+   | [`train/pano_grf_train_depth_anywhere.tar`](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/train/pano_grf_train_depth_anywhere.tar) (3.4 GB) | train set: `depth_anywhere.png` per view | MP3D training |
+   | [`train/360Loc_train_unik3d.tar.xz`](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/train/360Loc_train_unik3d.tar.xz) (17 GB) | concourse, hall, piatrium: `depth_metric/` | 360Loc training |
+   | [`train/360Loc_train_depth_anywhere.tar`](https://huggingface.co/datasets/eacsai/CylinderSplat/resolve/main/train/360Loc_train_depth_anywhere.tar) (0.5 GB) | concourse, hall, piatrium: `depthanywhere/` | not read by training (completeness) |
 
-   SHA-256: [`SHA256SUMS_depth`](https://1drv.ms/u/c/86d953bfc66eb903/IQDT3HfkB015Rb0PRlu64kRbAcE6QFynTI6p21TSnE5hMOw).
-   The UniK3D prior of the two training sets is not included (about 250 GB for MP3D and 27 GB for 360Loc);
-   generate it with the depth-prior tool below.
+   The images and poses of the evaluation sets are there as well (`eval/pano_grf_evalsets_images.tar`,
+   `eval/360Loc_atrium_images.tar`), so evaluation needs nothing else; this is what `scripts/reproduce.sh` uses.
+   The four `.tar` depth archives are also in the `depth/` subfolder of the OneDrive folder.
 
    ```bash
    cd /path/to/pano_grf && tar -xf pano_grf_evalsets_depth.tar && tar -xf pano_grf_train_depth_anywhere.tar
-   cd /path/to/360Loc   && tar -xf 360Loc_atrium_depth.tar
+   for f in pano_grf_train_unik3d.part*.tar.xz; do xz -T0 -dc "$f" | tar -x; done
+   cd /path/to/360Loc   && tar -xf 360Loc_atrium_depth.tar && xz -T0 -dc 360Loc_train_unik3d.tar.xz | tar -x
    ```
-3. **Point the loaders at your copies.** The dataset roots are constants in the loaders:
+3. **Point the loaders at your copies** with environment variables holding absolute paths (defaults in
+   [`data/paths.py`](data/paths.py)):
 
-   | loader | constant | default |
+   | variable | loaders | default |
    |---|---|---|
-   | `data/mp3d_dataloader_{double_256,single_256,double_512}.py` | module-level `roots` | `/data/qiwei/nips25/pano_grf` |
-   | `data/loc360_dataloader_double_all_512.py` | `root` in `Dataset360Loc.__init__` | `/data/qiwei/nips25/360Loc` |
-   | `data/vigor_dataloader_double.py` (Kansas City) | `root_dir` in `load_VIGOR_data` and in the `kansas_double_160` row of `configs/entries.py` | `/data/qiwei/nips25/` |
+   | `CYLINDERSPLAT_PANO_GRF` | `data/mp3d_dataloader_{double_256,single_256,double_512}.py` | `/data/qiwei/nips25/pano_grf` |
+   | `CYLINDERSPLAT_360LOC` | `data/loc360_dataloader_double_all_512.py` | `/data/qiwei/nips25/360Loc` |
+
+   The Kansas City root is `root_dir` in `load_VIGOR_data` (`data/vigor_dataloader_double.py`) and in the
+   `kansas_double_160` row of `configs/entries.py` (default `/data/qiwei/nips25/`).
 
 **Layouts.** Matterport3D / Replica / Residential (PanoGRF renders, three views per sequence; the two-view loaders
 take views [0, 2] as inputs, the single-view loader view [1]):
@@ -226,7 +251,7 @@ RUNS=$CYLINDERSPLAT_RUNS_ROOT
 R=configs/OmniScene/release
 L3="accelerate launch --config-file configs/accelerate/accel_3proc.yaml train.py"
 
-# stage 1: pixel branch (set backbone_ckpt first, see Checkpoints)
+# stage 1: pixel branch (set CYLINDERSPLAT_PANSPLAT_CKPT first, see Checkpoints)
 $L3 --entry mp3d_double_256 --py-config $R/stage1_pixel_256_b4.py --run-id s1 --switch ddp_forward=true
 # stage 2: volume branch, from the selected stage-1 checkpoint
 $L3 --entry mp3d_double_256 --py-config $R/stage2_volume_256_b4.py --run-id s2 --switch ddp_forward=true \
@@ -283,7 +308,10 @@ network from `checkpoints/` relative to the working directory.
 ## Evaluation
 
 ```bash
-C=checkpoints/dev_release_20261004
+D=$PWD/hf_data               # where scripts/reproduce.sh puts the files (absolute paths)
+export CYLINDERSPLAT_PANO_GRF=$D/pano_grf CYLINDERSPLAT_360LOC=$D/360Loc
+export CYLINDERSPLAT_PANSPLAT_CKPT=$D/checkpoints/pansplat_backbone/pansplat_last.ckpt
+C=$D/checkpoints
 O=configs/OmniScene
 python evaluate.py --dataset mp3d_double_256      --py-config $O/omni_gs_160x320_mp3d_cylinder_all_256.py      --ckpt $C/mp3d_stage3_joint_256x512  --out-dir runs/eval_stage3
 python evaluate.py --dataset mp3d_double_512_full --py-config $O/omni_gs_160x320_mp3d_cylinder_all_512x1024.py --ckpt $C/mp3d_stage4_joint_512x1024 --out-dir runs/eval_stage4
@@ -330,6 +358,7 @@ metrics), `--fast-ssim` (adds a GPU SSIM column).
 | `configs/accelerate/` | launch configs for 1, 2 and 3 processes |
 | `model/`, `data/`, `builder/` | models, loaders, model registry |
 | `tools/` | switches, checkpoint loading rules, metrics, the depth-prior tool |
+| `scripts/reproduce.sh` | download, check and evaluate the released checkpoints |
 | `pano_gaussian/`, `simple-knn/` | CUDA extensions (glm is a submodule) |
 | `tests/` | CPU tests: `CUDA_VISIBLE_DEVICES= python -m pytest tests/` |
 

@@ -15,8 +15,11 @@ from .pixel import PixelGaussian512
 
 from collections import OrderedDict
 
-# PanSplat checkpoint the stage-1 backbone is initialised from (the author's machine).
-DEFAULT_BACKBONE_CKPT = "/home/qiwei/Nips25/PanSplat/logs/wwrerdvv/checkpoints/last.ckpt"
+# PanSplat checkpoint the stage-1 backbone is initialised from: $CYLINDERSPLAT_PANSPLAT_CKPT, else the
+# author's machine. Also read when the model is built for evaluation (the checkpoint then overwrites it).
+DEFAULT_BACKBONE_CKPT = os.environ.get(
+    "CYLINDERSPLAT_PANSPLAT_CKPT", "/home/qiwei/Nips25/PanSplat/logs/wwrerdvv/checkpoints/last.ckpt"
+)
 
 
 @MODELS.register_module()

@@ -16,6 +16,7 @@ output/
 outputs/
 workdirs/
 checkpoints/
+hf_data/
 
 # Model checkpoints and large generated assets
 *.ckpt

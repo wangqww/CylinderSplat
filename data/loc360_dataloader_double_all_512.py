@@ -1,6 +1,5 @@
 """360Loc two-view panorama loader at 256x512 (despite the file name) for the 360Loc train and eval rows."""
 
-from pathlib import Path
 from typing import Literal
 
 import torch
@@ -19,6 +18,7 @@ import torch.nn.functional as F
 import json
 from functools import cached_property
 from model.utils.ops import get_panorama_ray_directions, get_rays
+from .paths import LOC360_ROOT
 
 pano_width = 512
 pano_height = 256
@@ -136,7 +136,7 @@ class Dataset360Loc(IterableDataset):
             locations = ["concourse", "hall", "piatrium"]
         else:
             locations = ["atrium"]
-        root = Path("/data/qiwei/nips25/360Loc")
+        root = LOC360_ROOT
         self.data = []
         for location in locations:
             seqs = [list((root / location / folder).glob("*360*/")) for folder in ("mapping", "query_360")]

@@ -1,6 +1,5 @@
 """Matterport3D single-view panorama loader at 256x512 (the mp3d_single_256 rows)."""
 
-from pathlib import Path
 import os
 
 import torch
@@ -16,6 +15,7 @@ import random
 
 from torch.utils.data import DataLoader
 from model.utils.ops import get_panorama_ray_directions, get_rays
+from .paths import PANO_GRF_ROOT
 from .util import Equirec2Cube
 
 test_datasets = [
@@ -27,7 +27,7 @@ test_datasets = [
     {"name": "residential", "dis": 0.15},
     {"name": "replica", "dis": 0.5},
 ]
-roots = [Path("/data/qiwei/nips25/pano_grf")]
+roots = [PANO_GRF_ROOT]
 pano_width = 512
 pano_height = 256
 
