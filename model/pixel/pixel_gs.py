@@ -20,6 +20,7 @@ from .ldm_unet.unet import UNetModel
 from ..backbone.unimatch.geometry import points_grid
 from .unifuse.networks import UniFuse
 from .unifuse.networks.convert_module import erp_convert
+from ..utils.quaternion import compose_quaternion_c2w
 
 def prepare_feat_proj_data_lists(
     features: Float[Tensor, "b v c h w"],
@@ -122,12 +123,24 @@ class PixelGaussian(BaseModule):
                  gh_cnn_layers=3,
                  gaussians_per_pixel=3,
                  num_frames=2,
+                 rotate_gaussians_to_world=False,
+                 pixel_depth_sampling="bilinear",
                  **kwargs,
                  ):
+        """
+        rotate_gaussians_to_world: D4 switch (default off = released code); rotate the
+            camera-frame quaternions by the c2w rotation that moves the means to the world.
+        pixel_depth_sampling: D9 switch; grid_sample mode used to read the depth prior
+            at the Gaussian sample points, "bilinear" (default = released code) or "nearest".
+        """
 
         super().__init__()
 
         self.gaussians_per_pixel = gaussians_per_pixel
+        self.rotate_gaussians_to_world = bool(rotate_gaussians_to_world)
+        if pixel_depth_sampling not in ("bilinear", "nearest"):
+            raise ValueError(f"pixel_depth_sampling must be 'bilinear' or 'nearest', got {pixel_depth_sampling!r}")
+        self.pixel_depth_sampling = pixel_depth_sampling
         feature_channels_list = [128, 96, 64, 32]
         self.costvolume_unet_feat_dims_list = [128, 64, 32]
         # gs_channels = 1 + 1 + 3 + 4 + 3 # offset, opacity, scale, rotation, rgb
@@ -325,6 +338,25 @@ class PixelGaussian(BaseModule):
         # must be called after forward
         self.padded_cache = [{} for _ in range(self.gh_stages)]
 
+    def _sample_prior_depth(self, depths_in_fullres, grid):
+        """Read the depth prior at the Gaussian sample points (D9 pixel_depth_sampling)."""
+        if self.pixel_depth_sampling == "bilinear":
+            return F.grid_sample(depths_in_fullres, grid, padding_mode="border")
+        return F.grid_sample(depths_in_fullres, grid, mode=self.pixel_depth_sampling, padding_mode="border")
+
+    def _assemble_gaussians(self, means, rgbs, opacities, rotations, scales, extrinsics):
+        """Concatenate the world-frame Gaussians [B, V*M, 14].
+
+        D4 (rotate_gaussians_to_world): the quaternions [B, V*M, 4], view-major like the
+        means, are rotated by the c2w rotation of their view, extrinsics[..., :3, :3]
+        ([B, V, 4, 4] c2w, the poses the means were moved to the world with).
+        """
+        if self.rotate_gaussians_to_world:
+            rotations = rearrange(rotations, "b (v m) c -> b v m c", v=extrinsics.shape[1])
+            rotations = compose_quaternion_c2w(rotations, extrinsics[..., :3, :3])
+            rotations = rearrange(rotations, "b v m c -> b (v m) c")
+        return torch.cat([means, rgbs, opacities, rotations, scales], dim=-1)
+
     def forward(self, img, img_feats, depths_in, confs_in, pluckers_in, origins_in, directions_in, extrinsics_in, patch_idx=0, status="train"):
         """Forward training function."""
         bs, v, _, img_h, img_w = img.shape
@@ -457,7 +489,7 @@ class PixelGaussian(BaseModule):
             else:
                 full_grid_expanded = full_grid
                 patch_grid_expanded = patch_grid
-            depths_in_curr = F.grid_sample(depths_in_fullres, full_grid_expanded, padding_mode="border")
+            depths_in_curr = self._sample_prior_depth(depths_in_fullres, full_grid_expanded)
             origins_curr = F.grid_sample(origins_fullres, full_grid_expanded, padding_mode="border")
             directions_curr = F.grid_sample(directions_fullres, full_grid_expanded, padding_mode="border")
             raw_gaussians = F.grid_sample(raw_gaussians, patch_grid, padding_mode="border")
@@ -571,7 +603,7 @@ class PixelGaussian(BaseModule):
             multiplier = self.get_scale_multiplier(pixel_size)
             scales_new = scales_new * depth_pred * multiplier[..., None]
 
-            gaussians_final = torch.cat([means, rgbs, opacities, rotations, scales_new], dim=-1)
+            gaussians_final = self._assemble_gaussians(means, rgbs, opacities, rotations, scales_new, extrinsics_in)
 
             # Handle features for multiple gaussians per pixel
             if self.gaussians_per_pixel > 1:

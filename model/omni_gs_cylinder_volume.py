@@ -18,11 +18,12 @@ from .losses import LPIPS, LossDepthTV
 from .utils.image import maybe_resize
 from .utils.benchmarker import Benchmarker
 from .utils.interpolation import interpolate_extrinsics
+from .utils.quaternion import compose_quaternion_c2w
 
-from vis_feat import single_features_to_RGB, reduce_gaussian_features_to_rgb, save_point_cloud, point_features_to_rgb_colormap
+# vis_feat (PCA feature maps, open3d point clouds) is only used by the commented-out
+# debug blocks below; import it there when re-enabling one of them.
 
 from pano2cube import Equirec2Cube, Cube2Equirec
-from vis_feat import single_features_to_RGB
 import torchvision.transforms as transforms
 to_pil_image = transforms.ToPILImage()
 import matplotlib.cm as cm
@@ -52,12 +53,24 @@ class OmniGaussianCylinderVolume(BaseModule):
                  use_checkpoint=False,
                  point_cloud_range=None,
                  name='',
+                 lpips_eval=False,
+                 freeze_frozen_bn=False,
+                 rotate_gaussians_to_world=False,
                  **kwargs,
                  ):
+        """Switches (tools/switches.py; the defaults reproduce the released model):
+            lpips_eval: the LPIPS network stays in eval() (no dropout) after every train() call.
+            freeze_frozen_bn: the frozen backbone / neck / pixel_gs stay in eval() after every
+                train() call (no BatchNorm statistics updates, no dropout).
+            rotate_gaussians_to_world: volume Gaussian rotations follow the camera-to-world rotation.
+        """
 
         super().__init__()
         self.name = name
         self.use_checkpoint = use_checkpoint
+        self.lpips_eval = lpips_eval
+        self.freeze_frozen_bn = freeze_frozen_bn
+        self.rotate_gaussians_to_world = rotate_gaussians_to_world
         if backbone:
             self.backbone = MODELS.build(backbone)
         if neck:
@@ -91,6 +104,20 @@ class OmniGaussianCylinderVolume(BaseModule):
 
         # record runtime
         self.benchmarker = Benchmarker()
+
+    def train(self, mode=True):
+        """nn.Module.train; lpips_eval / freeze_frozen_bn put the LPIPS network / the frozen
+        modules back into eval()."""
+        module = super().train(mode)
+        if self.lpips_eval and self.perceptual_loss is not None:
+            self.perceptual_loss.eval()
+        if self.freeze_frozen_bn:
+            self.pixel_gs.eval()
+            if hasattr(self, "backbone"):
+                self.backbone.eval()
+            if hasattr(self, "neck"):
+                self.neck.eval()
+        return module
 
     def extract_img_feat(self, img, depths_in, confs_in, pluckers, viewmats, status="train"):
         """Extract features of images."""
@@ -287,7 +314,12 @@ class OmniGaussianCylinderVolume(BaseModule):
         )
 
         new_gaussian_points = transform_points(gaussians_volume[..., :3], rearrange(data_dict["c2ws"], "b v h w -> (b v) h w")) # [B*v, N, 3]
-        gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
+        if self.rotate_gaussians_to_world:
+            # rotation channels 7:11 (wxyz) move to the world frame with the same c2w as xyz
+            new_gaussian_rotations = compose_quaternion_c2w(gaussians_volume[..., 7:11], rearrange(data_dict["c2ws"][..., :3, :3], "b v h w -> (b v) h w"))
+            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:7], new_gaussian_rotations, gaussians_volume[..., 11:]], dim=-1)
+        else:
+            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
         gaussians_volume = rearrange(gaussians_volume, '(b v) n c -> b (v n) c', v=v)
         
         # original
@@ -305,11 +337,8 @@ class OmniGaussianCylinderVolume(BaseModule):
         render_fovys = data_dict["output_fovys"]
         
         # ======================== render ======================== #
-        render_pkg_pixel_bev = self.renderer.render_orthographic(
-            gaussians=gaussians_volume,
-            width=30,
-            height=30, #mp3d 15 vigor 35
-        )
+        # The losses (and the validation images) read render_pkg_volume only; the pixel render
+        # and the orthographic BEV debug render are gone.
         if split == "train" or split == "val":
             render_pkg_volume = self.renderer.render(
                 gaussians=gaussians_volume,
@@ -319,16 +348,8 @@ class OmniGaussianCylinderVolume(BaseModule):
                 rays_o=None,
                 rays_d=None
             )
-            render_pkg_pixel = self.renderer.render(
-                gaussians=gaussians_pixel,
-                c2w=render_c2w,
-                fovx=render_fovxs,
-                fovy=render_fovys,
-                rays_o=None,
-                rays_d=None
-            )
         else:
-            render_pkg_pixel, render_pkg_volume = None, None
+            render_pkg_volume = None
         
         # ======================== losses ======================== #
         loss = 0.0
@@ -358,16 +379,6 @@ class OmniGaussianCylinderVolume(BaseModule):
 
         # test_img = to_pil_image(mask_dptm[0])    
         # test_img.save('mask_dptm.png')
-
-        test_img = to_pil_image(render_pkg_volume["image"][0,0].clip(min=0, max=1))    
-        test_img.save(f'render_volume_mp3d_volume_{self.name}.png')
-        test_img = to_pil_image(rgb_gt[0,0].clip(min=0, max=1))    
-        test_img.save(f'render_gt_mp3d_volume_{self.name}.png')
-        test_img = to_pil_image(render_pkg_pixel["image"][0,0].clip(min=0, max=1))    
-        test_img.save(f'render_pixel_mp3d_volume_{self.name}.png')
-        test_img = to_pil_image(render_pkg_pixel_bev["image"][0].clip(min=0, max=1))
-        test_img.save(f'render_bev_mp3d_volume_{self.name}.png')
-
 
         # vis rgb points
         # idx = 4
@@ -500,7 +511,12 @@ class OmniGaussianCylinderVolume(BaseModule):
             )
 
             new_gaussian_points = transform_points(gaussians_volume[..., :3], rearrange(data_dict["c2ws"], "b v h w -> (b v) h w"))
-            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
+            if self.rotate_gaussians_to_world:
+                # rotation channels 7:11 (wxyz) move to the world frame with the same c2w as xyz
+                new_gaussian_rotations = compose_quaternion_c2w(gaussians_volume[..., 7:11], rearrange(data_dict["c2ws"][..., :3, :3], "b v h w -> (b v) h w"))
+                gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:7], new_gaussian_rotations, gaussians_volume[..., 11:]], dim=-1)
+            else:
+                gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
             gaussians_volume = rearrange(gaussians_volume, '(b v) n c -> b (v n) c', v=v)
 
             # original
@@ -544,11 +560,6 @@ class OmniGaussianCylinderVolume(BaseModule):
         target_imgs = data_dict["output_imgs"] * mask_dptm.unsqueeze(2) # b v 3 h w
         target_depths = data_dict["output_depths"] # b v 1 h w
         target_depths_m = data_dict["output_depths_m"] # b v 1 h w
-        
-        test_img = to_pil_image(target_imgs[0,0])    
-        test_img.save('render_gt_mp3d_volume_t.png')
-        test_img = to_pil_image(output_imgs[0,0])    
-        test_img.save('render_volume_mp3d_volume_t.png')
 
         preds = {"img": output_imgs, "depth": output_depths, "gaussian": gaussians_all}
         gts = { "img": target_imgs, 

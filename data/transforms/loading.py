@@ -117,8 +117,8 @@ def load_lidar_info(info):
     lidar2sensor[:3, 3:4] = -1 * np.matmul(rot.T, trans.reshape(3, 1))
     return pcd_path, lidar2sensor
 
-from nuscenes.utils.geometry_utils import view_points
 def load_sparse_depths(points, lidar2sensor, w2c, ck):
+    from nuscenes.utils.geometry_utils import view_points  # nuScenes devkit, only for this legacy loader
     # transform lidar points to camera coordinate
     points[:, :3] = points[:, :3] @ lidar2sensor[:3, :3]
     points[:, :3] -= lidar2sensor[:3, 3]

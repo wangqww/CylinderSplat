@@ -6,8 +6,22 @@ from torchvision import models
 from collections import namedtuple
 # from torchmetrics import PearsonCorrCoef
 
-from taming.util import get_ckpt_path
 import math
+import os
+
+# The LPIPS weights ship with the repo; resolve them from the repo root, not the cwd
+# (runs chdir into a scratch dir so that debug images never land in the repo).
+_LPIPS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "taming/modules/autoencoder/lpips")
+_LPIPS_FILES = {"vgg_lpips": "vgg.pth"}
+
+
+def get_ckpt_path(name, root=_LPIPS_DIR):
+    """Path of the shipped LPIPS weights (replaces taming.util.get_ckpt_path, which returned
+    the same path when the file exists and otherwise downloaded it)."""
+    path = os.path.join(root, _LPIPS_FILES[name])
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"LPIPS weights not found: {path} (they ship with the repo under taming/)")
+    return path
 
 class LossDepthTV(nn.Module):
     def __init__(self, use_second_derivative=False, sigma_image=False, near=0.1, far=1000.0):
@@ -52,7 +66,7 @@ class LPIPS(nn.Module):
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
-        ckpt = get_ckpt_path(name, "taming/modules/autoencoder/lpips")
+        ckpt = get_ckpt_path(name, _LPIPS_DIR)
         #ckpt = ".cache/vgg.pth"
         self.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         print("loaded pretrained LPIPS loss from {}".format(ckpt))

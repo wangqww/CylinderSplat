@@ -11,10 +11,18 @@ from torch import Tensor
 
 from mmengine.registry import MODELS
 
+from .theta_periodic import pad_levels_circular, wrap_sampling_locations
+
 
 @MODELS.register_module()
 class TPVCrossViewHybridAttention(BaseModule):
-    """TPVFormer Cross-view Hybrid Attention Module."""
+    """TPVFormer Cross-view Hybrid Attention Module.
+
+    theta_periodic (D5, default False, set by the cylinder encoder): the planes
+    are [hw, zh, wz] with h = theta, so theta is the row axis of plane 0 and
+    the column axis of plane 1; sampling wraps along it and those two planes
+    are read through a circular halo.
+    """
 
     def __init__(self,
                  tpv_h: int,
@@ -26,6 +34,7 @@ class TPVCrossViewHybridAttention(BaseModule):
                  num_anchors: int = 2,
                  init_mode: int = 0,
                  dropout: float = 0.1,
+                 theta_periodic: bool = False,
                  **kwargs):
         super().__init__()
         self.embed_dims = embed_dims
@@ -49,6 +58,7 @@ class TPVCrossViewHybridAttention(BaseModule):
             [nn.Linear(embed_dims, embed_dims) for _ in range(3)])
 
         self.tpv_h, self.tpv_w, self.tpv_z = tpv_h, tpv_w, tpv_z
+        self.theta_periodic = theta_periodic
 
     def init_weights(self):
         """Default initialization for Parameters of Module."""
@@ -191,6 +201,14 @@ class TPVCrossViewHybridAttention(BaseModule):
             raise ValueError(
                 f'Last dim of reference_points must be'
                 f' 2, but get {reference_points.shape[-1]} instead.')
+
+        if self.theta_periodic:
+            # D5: theta = rows (y) of the hw plane, columns (x) of the zh plane
+            periodic_axes = [1, 0, None]
+            sampling_locations = wrap_sampling_locations(
+                sampling_locations, spatial_shapes, periodic_axes)
+            value, spatial_shapes, level_start_index = pad_levels_circular(
+                value, spatial_shapes, periodic_axes)
 
         if torch.cuda.is_available() and value.is_cuda:
             output = MultiScaleDeformableAttnFunction.apply(

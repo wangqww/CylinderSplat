@@ -15,6 +15,8 @@ if renderer_type == 'panorama':
         GaussianRasterizer
     )
 else:
+    # Only the cube-map ("vanilla") renderer needs diff-gaussian-rasterization; it is
+    # imported only when that renderer is selected, so it is not an install requirement.
     from diff_gaussian_rasterization import (
         GaussianRasterizationSettings, 
         GaussianRasterizer
@@ -22,6 +24,32 @@ else:
 
 from .utils.ops import get_cam_info_gaussian
 from .utils.typing import *
+
+
+# D8 (switch render.prune_opacity, set by the entry points): GaussianRenderer.render
+# drops Gaussians whose opacity is below this threshold before panorama rasterisation.
+# 0 (default) = off, render() then runs exactly the released code.
+_prune_opacity = 0.0
+
+
+def set_prune_opacity(tau: float) -> None:
+    """Set the opacity pruning threshold of the panorama render (0 = off)."""
+    global _prune_opacity
+    tau = float(tau)
+    if not 0.0 <= tau < 1.0:
+        raise ValueError(f"prune_opacity must be in [0, 1), got {tau}")
+    _prune_opacity = tau
+
+
+def get_prune_opacity() -> float:
+    """Current opacity pruning threshold (0 = off)."""
+    return _prune_opacity
+
+
+def prune_by_opacity(tau, means3D, rgbs, opacity, rotations, scales):
+    """Keep the Gaussians with opacity >= tau; one mask for every per-Gaussian tensor."""
+    keep = opacity[:, 0] >= tau
+    return means3D[keep], rgbs[keep], opacity[keep], rotations[keep], scales[keep]
 
 
 C0 = 0.28209479177387814
@@ -250,6 +278,9 @@ class GaussianRenderer:
             opacity = gaussians[b, :, 6:7].contiguous().float()
             rotations = gaussians[b, :, 7:11].contiguous().float()
             scales = gaussians[b, :, 11:].contiguous().float()
+            if _prune_opacity > 0 and self.renderer_type == "panorama":
+                means3D, rgbs, opacity, rotations, scales = prune_by_opacity(
+                    _prune_opacity, means3D, rgbs, opacity, rotations, scales)
             means2D = torch.zeros_like(means3D, dtype=means3D.dtype, device=device)
 
             for v in range(V):

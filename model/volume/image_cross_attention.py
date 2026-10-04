@@ -10,6 +10,7 @@ from mmengine.model import BaseModule, constant_init, xavier_init
 
 from mmengine.registry import MODELS
 from itertools import chain
+from .theta_periodic import pad_levels_circular, wrap_sampling_locations
 
 @MODELS.register_module()
 class TPVImageCrossAttention(BaseModule):
@@ -207,6 +208,10 @@ class TPVMSDeformableAttention3D(BaseModule):
             Default: None.
         init_cfg (obj:`mmcv.ConfigDict`): The Config for initialization.
             Default: None.
+        theta_periodic (bool): Treat the image u axis (equirect azimuth) as
+            periodic: wrap sampling locations along u and read the value maps
+            through a circular halo (D5). Set by the cylinder encoder.
+            Default: False.
     """
 
     def __init__(
@@ -226,6 +231,7 @@ class TPVMSDeformableAttention3D(BaseModule):
         tpv_h=None,
         tpv_w=None,
         tpv_z=None,
+        theta_periodic=False,
     ):
         super().__init__(init_cfg)
         if embed_dims % num_heads != 0:
@@ -276,6 +282,7 @@ class TPVMSDeformableAttention3D(BaseModule):
             for i in range(3)
         ])
         self.value_proj = nn.Linear(embed_dims, embed_dims)
+        self.theta_periodic = theta_periodic
 
     def init_weights(self):
         """Default initialization for Parameters of Module."""
@@ -450,6 +457,14 @@ class TPVMSDeformableAttention3D(BaseModule):
             raise ValueError(
                 f'Last dim of reference_points must be'
                 f' 2 or 4, but get {reference_points.shape[-1]} instead.')
+
+        if self.theta_periodic:
+            # D5: the panorama u axis (x) is periodic on every level
+            periodic_axes = [0] * spatial_shapes.shape[0]
+            sampling_locations = wrap_sampling_locations(
+                sampling_locations, spatial_shapes, periodic_axes)
+            value, spatial_shapes, level_start_index = pad_levels_circular(
+                value, spatial_shapes, periodic_axes)
 
         if torch.cuda.is_available() and value.is_cuda:
             output = MultiScaleDeformableAttnFunction.apply(

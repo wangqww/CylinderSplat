@@ -75,7 +75,6 @@ bins_demo = ['scene04219bfdc9004ba2af16d3079ecc4353_bin061',
 'sceneefa5c96f05594f41a2498eb9f2e7ad99_bin092',
 'scenef97bf749746c4c3a8ad9f1c11eab6444_bin009']
 
-from .transforms.loading import load_info, load_conditions
 class nuScenesDataset(Dataset):
     data_root: str = "/data/qiwei/dataset_omniscene"
     data_version: str = "interp_12Hz_trainval"
@@ -138,6 +137,9 @@ class nuScenesDataset(Dataset):
         return len(self.bin_tokens)
     
     def __getitem__(self, index):
+        # Lazy: .transforms.loading imports the optional nuscenes-devkit, which only
+        # this (legacy OmniScene) dataset needs; importing this module must not need it.
+        from .transforms.loading import load_info, load_conditions
 
         bin_token = self.bin_tokens[index]
         with open(osp.join(self.data_root, self.data_version, "bin_infos_3.2m", bin_token + ".pkl"), "rb") as f:

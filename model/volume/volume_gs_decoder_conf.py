@@ -5,7 +5,7 @@ from mmengine.registry import MODELS
 from sample_anchors import sample_concentrating_sphere, project_onto_planes
 import math
 from vis_feat import single_features_to_RGB
-from simple_knn._C import distCUDA2
+# simple_knn (distCUDA2) was only used by the commented-out anchor-distance line below.
 
 def sigmoid_scaling(scaling:torch.Tensor, lower_bound=0.005, upper_bound=0.02):
     sig = torch.sigmoid(scaling)

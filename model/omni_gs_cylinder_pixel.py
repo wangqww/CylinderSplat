@@ -18,14 +18,19 @@ from .losses import LPIPS, LossDepthTV
 from .utils.image import maybe_resize
 from .utils.benchmarker import Benchmarker
 from .utils.interpolation import interpolate_extrinsics
+from .pixel import PixelGaussian512
 
 from pano2cube import Equirec2Cube, Cube2Equirec
-from vis_feat import single_features_to_RGB, reduce_gaussian_features_to_rgb, save_point_cloud, point_features_to_rgb_colormap
+# vis_feat (PCA feature maps, open3d point clouds) is only used by the commented-out
+# debug blocks below; import it there when re-enabling one of them.
 import torchvision.transforms as transforms
 to_pil_image = transforms.ToPILImage()
 import matplotlib.cm as cm
 import cv2
 from collections import OrderedDict
+
+# PanSplat checkpoint the stage-1 backbone is initialised from (the author's machine).
+DEFAULT_BACKBONE_CKPT = '/home/qiwei/Nips25/PanSplat/logs/wwrerdvv/checkpoints/last.ckpt'
 
 def onlyDepth(depth, save_name):
     cmap = cm.Spectral
@@ -49,15 +54,34 @@ class OmniGaussianCylinderPixel(BaseModule):
                  dataset_params=None,
                  use_checkpoint=False,
                  point_cloud_range=None,
+                 backbone_ckpt=DEFAULT_BACKBONE_CKPT,
+                 lpips_eval=False,
+                 rotate_gaussians_to_world=False,
                  **kwargs,
                  ):
+        """
+        backbone_ckpt: PanSplat checkpoint (Lightning .ckpt with a 'state_dict') the backbone is
+            initialised from; required whenever a backbone is configured.
+        Switches (tools/switches.py; the defaults reproduce the released model):
+            lpips_eval: the LPIPS network stays in eval() (no dropout) after every train() call.
+            rotate_gaussians_to_world: accepted for config symmetry; this model has no volume
+                tail, its pixel head gets its own copy (model.pixel_gs.rotate_gaussians_to_world).
+        The single-view metas of get_data are unused by this model and stay as they are.
+        """
 
         super().__init__()
 
         self.use_checkpoint = use_checkpoint
+        self.lpips_eval = lpips_eval
+        self.rotate_gaussians_to_world = rotate_gaussians_to_world
         if backbone:
             self.backbone = MODELS.build(backbone)
-            ckpt_path = '/home/qiwei/Nips25/PanSplat/logs/wwrerdvv/checkpoints/last.ckpt'
+            ckpt_path = backbone_ckpt
+            if not ckpt_path or not os.path.isfile(ckpt_path):
+                raise FileNotFoundError(
+                    f"OmniGaussianCylinderPixel: PanSplat backbone checkpoint not found: {ckpt_path!r}. "
+                    "Set model.backbone_ckpt in the config to the PanSplat checkpoint the backbone is "
+                    "initialised from.")
             unimatch_pretrained_model = torch.load(ckpt_path)["state_dict"]
             updated_state_dict = OrderedDict(
                 {
@@ -88,6 +112,13 @@ class OmniGaussianCylinderPixel(BaseModule):
 
         # record runtime
         self.benchmarker = Benchmarker()
+
+    def train(self, mode=True):
+        """nn.Module.train; with lpips_eval the LPIPS network is put back into eval()."""
+        module = super().train(mode)
+        if self.lpips_eval and self.perceptual_loss is not None:
+            self.perceptual_loss.eval()
+        return module
 
     def extract_img_feat(self, img, depths_in, confs_in, pluckers, viewmats, status="train"):
         """Extract features of images."""
@@ -209,10 +240,17 @@ class OmniGaussianCylinderPixel(BaseModule):
                                         )
 
         # pixel-gs prediction
-        gaussians = self.pixel_gs(
-                img, img_feats,
-                data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
-                data_dict["rays_o"], data_dict["rays_d"], data_dict["c2ws"])
+        if isinstance(self.pixel_gs, PixelGaussian512):
+            # PixelGaussian512 takes the poses by keyword (its 8th positional slot is patch_idx)
+            gaussians = self.pixel_gs(
+                    img, img_feats,
+                    data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
+                    data_dict["rays_o"], data_dict["rays_d"], extrinsics_in=data_dict["c2ws"])
+        else:
+            gaussians = self.pixel_gs(
+                    img, img_feats,
+                    data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
+                    data_dict["rays_o"], data_dict["rays_d"], data_dict["c2ws"])
 
         gaussians_all = gaussians['gaussians']
 
@@ -229,11 +267,7 @@ class OmniGaussianCylinderPixel(BaseModule):
             rays_d=None
         )
 
-        render_pkg_pixel_bev = self.renderer.render_orthographic(
-            gaussians=gaussians_all,
-            width=30,
-            height=30, #mp3d 15 vigor 35
-        )
+        # the fused render above is the loss input; the orthographic BEV debug render is gone
         if split == "train" or split == "val":
             render_pkg_pixel = render_pkg_fuse
             render_pkg_volume = render_pkg_pixel
@@ -266,13 +300,6 @@ class OmniGaussianCylinderPixel(BaseModule):
         mask_dptm = mask_dptm.float()
         # mask_dptm = self.E2C(mask_dptm).squeeze(2)
         data_dict["mask_dptm"] = mask_dptm
-
-        test_img = to_pil_image(render_pkg_pixel["image"][0,1].clip(min=0, max=1))    
-        test_img.save('render_pred_mp3d_pixel.png')
-        test_img = to_pil_image(rgb_gt[0,1].clip(min=0, max=1))    
-        test_img.save('render_gt_mp3d_pixel.png')
-        test_img = to_pil_image(render_pkg_pixel_bev["image"][0].clip(min=0, max=1))
-        test_img.save('render_bev_mp3d_pixel.png')
 
         # vis rgb points
         # idx = 4
@@ -352,10 +379,17 @@ class OmniGaussianCylinderPixel(BaseModule):
                                 )
 
             # pixel-gs prediction
-            gaussians = self.pixel_gs(
-                    img, img_feats,
-                    data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
-                    data_dict["rays_o"], data_dict["rays_d"], data_dict["c2ws"], status='test')
+            if isinstance(self.pixel_gs, PixelGaussian512):
+                # PixelGaussian512 takes the poses by keyword (its 8th positional slot is patch_idx)
+                gaussians = self.pixel_gs(
+                        img, img_feats,
+                        data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
+                        data_dict["rays_o"], data_dict["rays_d"], extrinsics_in=data_dict["c2ws"], status='test')
+            else:
+                gaussians = self.pixel_gs(
+                        img, img_feats,
+                        data_dict["depths"], data_dict["confs"], data_dict["pluckers"],
+                        data_dict["rays_o"], data_dict["rays_d"], data_dict["c2ws"], status='test')
 
             gaussians_all = gaussians['gaussians']
             # vis feature points

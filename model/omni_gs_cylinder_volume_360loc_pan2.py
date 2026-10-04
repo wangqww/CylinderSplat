@@ -18,9 +18,11 @@ from .losses import LPIPS, LossDepthTV
 from .utils.image import maybe_resize
 from .utils.benchmarker import Benchmarker
 from .utils.interpolation import interpolate_extrinsics
+from .utils.quaternion import compose_quaternion_c2w
 
 from pano2cube import Equirec2Cube, Cube2Equirec
-from vis_feat import single_features_to_RGB, reduce_gaussian_features_to_rgb, save_point_cloud, point_features_to_rgb_colormap
+# vis_feat (PCA feature maps, open3d point clouds) is only used by the commented-out
+# debug blocks below; import it there when re-enabling one of them.
 import torchvision.transforms as transforms
 to_pil_image = transforms.ToPILImage()
 import matplotlib.cm as cm
@@ -49,12 +51,33 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
                  dataset_params=None,
                  use_checkpoint=False,
                  point_cloud_range=None,
+                 lpips_eval=False,
+                 v1_identity_pose=False,
+                 rotate_gaussians_to_world=False,
+                 depth_valid_mask=False,
+                 depth_valid_near=0.45,
+                 depth_valid_far=50.0,
                  **kwargs,
                  ):
+        """Switches (tools/switches.py; the defaults reproduce the released model):
+            lpips_eval: the LPIPS network stays in eval() (no dropout) after every train() call.
+            v1_identity_pose: a single input view uses the identity pose w2i @ inv(w2i) in its metas.
+            rotate_gaussians_to_world: volume Gaussian rotations follow the camera-to-world rotation.
+            depth_valid_mask: the depth losses skip pixels whose prior depth lies outside
+                (depth_valid_near, depth_valid_far), the bounds of the 360Loc loader's (unused) validity
+                mask (data/loc360_dataloader_double_all_512.py: near 0.45, far 50); without it, zero and
+                out-of-range prior depths are supervised.
+        """
 
         super().__init__()
 
         self.use_checkpoint = use_checkpoint
+        self.lpips_eval = lpips_eval
+        self.v1_identity_pose = v1_identity_pose
+        self.rotate_gaussians_to_world = rotate_gaussians_to_world
+        self.depth_valid_mask = depth_valid_mask
+        self.depth_valid_near = depth_valid_near
+        self.depth_valid_far = depth_valid_far
         
         self.backbone = MODELS.build(backbone)
         self.pixel_gs = MODELS.build(pixel_gs)
@@ -78,6 +101,17 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
 
         # self.E2C = Equirec2Cube(equ_h=160, equ_w=320, cube_length=self.camera_args['resolution'][0])
         # self.C2E = Cube2Equirec(cube_length=40, equ_h=80)
+
+    def _prior_depth_valid(self, depth_m_gt):
+        """depth_valid_mask: True where the prior depth is inside (depth_valid_near, depth_valid_far)."""
+        return (depth_m_gt > self.depth_valid_near) & (depth_m_gt < self.depth_valid_far)
+
+    def train(self, mode=True):
+        """nn.Module.train; with lpips_eval the LPIPS network is put back into eval()."""
+        module = super().train(mode)
+        if self.lpips_eval and self.perceptual_loss is not None:
+            self.perceptual_loss.eval()
+        return module
 
     def extract_img_feat(self, img, depths_in, confs_in, pluckers, viewmats, status="train"):
         """Extract features of images."""
@@ -150,7 +184,11 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
             # 1. 動態獲取當前樣本的視圖數量 v
             v = w2i.shape[0]
             if v < 2: # 如果視圖少於2個，無法計算相對姿態，跳過或只用絕對姿態
-                img_metas.append({"lidar2img": w2i, "img_shape": [[h, w]] * v})
+                if self.v1_identity_pose:
+                    # the single view is its own reference camera, as in OmniGaussianCylinderVolume
+                    img_metas.append({"lidar2img": w2i @ w2i.inverse(), "img_shape": [[h, w]] * v})
+                else:
+                    img_metas.append({"lidar2img": w2i, "img_shape": [[h, w]] * v})
                 continue
 
             # 2. 循環遍歷每一個視圖，將其輪流作為參考視圖 (reference camera)
@@ -265,7 +303,12 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
         )
 
         new_gaussian_points = transform_points(gaussians_volume[..., :3], rearrange(data_dict["c2ws"], "b v h w -> (b v) h w"))
-        gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
+        if self.rotate_gaussians_to_world:
+            # rotation channels 7:11 (wxyz) move to the world frame with the same c2w as xyz
+            new_gaussian_rotations = compose_quaternion_c2w(gaussians_volume[..., 7:11], rearrange(data_dict["c2ws"][..., :3, :3], "b v h w -> (b v) h w"))
+            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:7], new_gaussian_rotations, gaussians_volume[..., 11:]], dim=-1)
+        else:
+            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
 
         gaussians_all = torch.cat([gaussians_pixel, gaussians_volume], dim=1)
 
@@ -277,8 +320,14 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
         render_fovys = repeat(render_fovys, "b vc -> (b v) vc", v=v)
 
         # ======================== render ======================== #
-
-        if split == "train" or split == "val":
+        # The losses read the fused render after the inverse-distance blend below, and the volume
+        # render only through the volume loss terms. So the volume render (and its blend) is made
+        # only when one of those terms is on, the pixel-only render only for the validation
+        # images; the orthographic BEV debug render is gone.
+        need_volume = split == "val" or (split == "train" and (self.loss_args.weight_recon_vol > 0
+                                                               or self.loss_args.weight_perceptual_vol > 0
+                                                               or self.loss_args.weight_depth_abs_vol > 0))
+        if need_volume:
             render_pkg_volume = self.renderer.render(
                 gaussians=gaussians_volume,
                 c2w=render_c2w,
@@ -287,6 +336,9 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
                 rays_o=None,
                 rays_d=None
             )
+        else:
+            render_pkg_volume = None
+        if split == "val":
             render_pkg_pixel = self.renderer.render(
                 gaussians=gaussians_pixel,
                 c2w=render_c2w,
@@ -296,14 +348,8 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
                 rays_d=None
             )
         else:
-            render_pkg_pixel, render_pkg_volume = None, None
-        
+            render_pkg_pixel = None
 
-        render_pkg_pixel_bev = self.renderer.render_orthographic(
-            gaussians=gaussians_all,
-            width=30,
-            height=30, #mp3d 15 vigor 35
-        )
         render_pkg_fuse = self.renderer.render(
             gaussians=gaussians_all,
             c2w=render_c2w,
@@ -331,21 +377,23 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
         render_pkg_fuse["depth"] = tmp_pixel_depth.sum(dim=2, keepdim=False) # b v 1 h w
 
         # pixel
-        tmp_pixel_img = rearrange(render_pkg_pixel["image"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 3 h w
-        tmp_pixel_depth = rearrange(render_pkg_pixel["depth"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 1 h w
-        
-        tmp_pixel_img = tmp_pixel_img * weights[..., None, None, None]
-        render_pkg_pixel["image"] = tmp_pixel_img.sum(dim=2, keepdim=False) # b v 3 h w
-        tmp_pixel_depth = tmp_pixel_depth * weights[..., None, None, None]
-        render_pkg_pixel["depth"] = tmp_pixel_depth.sum(dim=2, keepdim=False) # b v 1 h w
+        if render_pkg_pixel is not None:
+            tmp_pixel_img = rearrange(render_pkg_pixel["image"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 3 h w
+            tmp_pixel_depth = rearrange(render_pkg_pixel["depth"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 1 h w
+            
+            tmp_pixel_img = tmp_pixel_img * weights[..., None, None, None]
+            render_pkg_pixel["image"] = tmp_pixel_img.sum(dim=2, keepdim=False) # b v 3 h w
+            tmp_pixel_depth = tmp_pixel_depth * weights[..., None, None, None]
+            render_pkg_pixel["depth"] = tmp_pixel_depth.sum(dim=2, keepdim=False) # b v 1 h w
         # volume
-        tmp_volume_img = rearrange(render_pkg_volume["image"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 3 h w
-        tmp_volume_depth = rearrange(render_pkg_volume["depth"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 1 h w
-        
-        tmp_volume_img = tmp_volume_img * weights[..., None, None, None]
-        render_pkg_volume["image"] = tmp_volume_img.sum(dim=2, keepdim=False) # b v 3 h w
-        tmp_volume_depth = tmp_volume_depth * weights[..., None, None, None]
-        render_pkg_volume["depth"] = tmp_volume_depth.sum(dim=2, keepdim=False) # b v 1 h w
+        if render_pkg_volume is not None:
+            tmp_volume_img = rearrange(render_pkg_volume["image"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 3 h w
+            tmp_volume_depth = rearrange(render_pkg_volume["depth"], "(b v) vc c h w -> b vc v c h w", b=bs, v=v) # b v vc 1 h w
+            
+            tmp_volume_img = tmp_volume_img * weights[..., None, None, None]
+            render_pkg_volume["image"] = tmp_volume_img.sum(dim=2, keepdim=False) # b v 3 h w
+            tmp_volume_depth = tmp_volume_depth * weights[..., None, None, None]
+            render_pkg_volume["depth"] = tmp_volume_depth.sum(dim=2, keepdim=False) # b v 1 h w
 
         # ======================== losses ======================== #
         loss = 0.0
@@ -372,17 +420,6 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
         mask_inside = (output_cylinder_r < self.point_cloud_range[3]) & (transformed_positions[..., 1] > self.point_cloud_range[2]) & (transformed_positions[..., 1] < self.point_cloud_range[5])
         mask_dptm = mask_inside.view(bs, v, render_c2w.shape[1], h, w).any(dim=1).float()
         data_dict["mask_dptm"] = mask_dptm
-
-        test_img = to_pil_image(render_pkg_fuse["image"][0,1].clip(min=0, max=1))    
-        test_img.save('render_fuse_360Loc_all.png')
-        test_img = to_pil_image(render_pkg_pixel["image"][0,1].clip(min=0, max=1))    
-        test_img.save('render_pixel_360Loc_all.png')
-        test_img = to_pil_image(render_pkg_volume["image"][0,1].clip(min=0, max=1))    
-        test_img.save('render_volume_360Loc_all.png')
-        test_img = to_pil_image(render_pkg_pixel_bev["image"][0].clip(min=0, max=1))
-        test_img.save('render_bev_360Loc_all.png')
-        test_img = to_pil_image(rgb_gt[0,1].clip(min=0, max=1))    
-        test_img.save('render_gt_360Loc_all.png') 
 
         # vis rgb points
         # points_xyz = gaussians_pixel[..., :3][4].detach().cpu().numpy()
@@ -450,6 +487,8 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
             depth_abs_loss = torch.abs(render_pkg_fuse["depth"] - depth_m_gt)
             depth_abs_loss = depth_abs_loss * conf_m_gt
             valid_mask = (render_pkg_fuse["depth"] > 0)
+            if self.depth_valid_mask:
+                valid_mask = valid_mask & self._prior_depth_valid(depth_m_gt)
             depth_abs_loss = depth_abs_loss[valid_mask].mean()
             loss = loss + self.loss_args.weight_depth_abs * depth_abs_loss
             set_loss("depth_abs", split, depth_abs_loss, self.loss_args.weight_depth_abs)
@@ -457,6 +496,8 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
         if self.loss_args.weight_depth_abs_vol > 0 and iter < iter_end:
             depth_abs_loss_vol = torch.abs(render_pkg_volume["depth"] - depth_m_gt)
             depth_abs_loss_vol = depth_abs_loss_vol * conf_m_gt
+            if self.depth_valid_mask:
+                depth_abs_loss_vol = depth_abs_loss_vol[self._prior_depth_valid(depth_m_gt).expand_as(depth_abs_loss_vol)]
             depth_abs_loss_vol = depth_abs_loss_vol.mean()
             loss = loss + self.loss_args.weight_depth_abs_vol * depth_abs_loss_vol
             set_loss("depth_abs_vol", split, depth_abs_loss_vol, self.loss_args.weight_depth_abs_vol)          
@@ -530,7 +571,12 @@ class OmniGaussianCylinderVolume360LocPan2(BaseModule):
             )
 
             new_gaussian_points = transform_points(gaussians_volume[..., :3], rearrange(data_dict["c2ws"], "b v h w -> (b v) h w"))
-            gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
+            if self.rotate_gaussians_to_world:
+                # rotation channels 7:11 (wxyz) move to the world frame with the same c2w as xyz
+                new_gaussian_rotations = compose_quaternion_c2w(gaussians_volume[..., 7:11], rearrange(data_dict["c2ws"][..., :3, :3], "b v h w -> (b v) h w"))
+                gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:7], new_gaussian_rotations, gaussians_volume[..., 11:]], dim=-1)
+            else:
+                gaussians_volume = torch.cat([new_gaussian_points, gaussians_volume[..., 3:]], dim=-1)
 
         gaussians_all = torch.cat([gaussians_pixel, gaussians_volume], dim=1)
 

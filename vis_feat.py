@@ -5,7 +5,6 @@ import os
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import open3d as o3d
 from skimage.measure import block_reduce # 导入块缩减函数
 from scipy.ndimage import map_coordinates
 
@@ -379,6 +378,8 @@ def save_point_cloud(points_xyz, points_rgb, filename="point_cloud.ply"):
     points_rgb (np.ndarray): 点的RGB颜色，形状为 [N, 3]，数值范围应在 [0, 1] 之间。
     filename (str): 要保存的文件名。
     """
+    import open3d as o3d  # optional dependency, only needed for point-cloud dumps
+
     # 1. 创建一个open3d的点云对象
     pcd = o3d.geometry.PointCloud()
 

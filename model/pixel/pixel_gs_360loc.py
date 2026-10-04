@@ -20,6 +20,7 @@ from .ldm_unet.unet import UNetModel
 from ..backbone.unimatch.geometry import points_grid
 from .unifuse.networks import UniFuse
 from .unifuse.networks.convert_module import erp_convert
+from ..utils.quaternion import compose_quaternion_c2w
 
 def prepare_feat_proj_data_lists(
     features: Float[Tensor, "b v c h w"],
@@ -121,12 +122,29 @@ class PixelGaussian360Loc(BaseModule):
                  patchs_width=1,
                  gh_cnn_layers=3,
                  gaussians_per_pixel=1,
+                 num_frames=2,
+                 rotate_gaussians_to_world=False,
+                 pixel_depth_sampling="bilinear",
                  **kwargs,
                  ):
+        """
+        num_frames: view count the cost-volume UNet's cross-view attention is built for
+            (default 2 = the released value); a model must be built with the view count it runs.
+            A single-view forward (v=1, PixelGaussian's self-correlation fallback) needs
+            num_frames=1 and raises ValueError otherwise.
+        rotate_gaussians_to_world: D4 switch (default off = released code); rotate the
+            camera-frame quaternions by the c2w rotation that moves the means to the world.
+        pixel_depth_sampling: D9 switch; grid_sample mode used to read the depth prior
+            at the Gaussian sample points, "bilinear" (default = released code) or "nearest".
+        """
 
         super().__init__()
 
         self.gaussians_per_pixel = gaussians_per_pixel
+        self.rotate_gaussians_to_world = bool(rotate_gaussians_to_world)
+        if pixel_depth_sampling not in ("bilinear", "nearest"):
+            raise ValueError(f"pixel_depth_sampling must be 'bilinear' or 'nearest', got {pixel_depth_sampling!r}")
+        self.pixel_depth_sampling = pixel_depth_sampling
         feature_channels_list = [128, 96, 64, 32]
         self.costvolume_unet_feat_dims_list = [128, 64, 32]
         # gs_channels = 1 + 1 + 3 + 4 + 3 # offset, opacity, scale, rotation, rgb
@@ -213,7 +231,7 @@ class PixelGaussian360Loc(BaseModule):
                 num_head_channels=32,
                 dims=2,
                 postnorm=True,
-                num_frames=2,
+                num_frames=num_frames,
                 use_cross_view_self_attn=True,
             ),
             nn.Conv2d(channels, channels, 3, 1, 1)
@@ -324,6 +342,34 @@ class PixelGaussian360Loc(BaseModule):
         # must be called after forward
         self.padded_cache = [{} for _ in range(self.gh_stages)]
 
+    def _sample_prior_depth(self, depths_in_fullres, grid):
+        """Read the depth prior at the Gaussian sample points (D9 pixel_depth_sampling)."""
+        if self.pixel_depth_sampling == "bilinear":
+            return F.grid_sample(depths_in_fullres, grid, padding_mode="border")
+        return F.grid_sample(depths_in_fullres, grid, mode=self.pixel_depth_sampling, padding_mode="border")
+
+    def _assemble_gaussians(self, means, rgbs, opacities, rotations, scales, extrinsics):
+        """Concatenate the world-frame Gaussians [B, V, M, 14].
+
+        D4 (rotate_gaussians_to_world): the quaternions [B, V, M, 4] are rotated by the
+        c2w rotation of their view, extrinsics[..., :3, :3] ([B, V, 4, 4] c2w, the poses
+        the means were moved to the world with).
+        """
+        if self.rotate_gaussians_to_world:
+            rotations = compose_quaternion_c2w(rotations, extrinsics[..., :3, :3])
+        return torch.cat([means, rgbs, opacities, rotations, scales], dim=-1)
+
+    def _check_single_view_frames(self):
+        """Single-view forward (v == 1 only): the cost-volume UNet must be built with num_frames=1.
+
+        Its cross-view attention folds the '(v b)' batch with the build-time view count, so a
+        num_frames=2 UNet run at v=1 with batch 2 would silently attend across the two samples.
+        """
+        frames = {m.n_frames for m in self.corr_refine_nets.modules() if hasattr(m, "n_frames")}
+        if frames - {1}:
+            raise ValueError(f"PixelGaussian360Loc got a single view but its cost-volume UNet is built "
+                             f"for num_frames={sorted(frames)}; build the head with num_frames=1")
+
     def forward(self, img, img_feats, depths_in, confs_in, pluckers_in, origins_in, directions_in, extrinsics_in, patch_idx=0, status="train"):
         """Forward training function."""
         bs, v, _, img_h, img_w = img.shape
@@ -372,6 +418,19 @@ class PixelGaussian360Loc(BaseModule):
                     c**0.5
                 )  # [vB, D, H, W]
                 raw_correlation_in_lists.append(raw_correlation_in)
+
+            if len(raw_correlation_in_lists) == 0:
+                # Reached only at v == 1 (the loop above builds v - 1 cost volumes; the
+                # released code stopped at torch.stack([]) here): PixelGaussian's single-view
+                # fallback, the feature self-correlation. Every v >= 2 forward skips this block.
+                self._check_single_view_frames()
+                raw_correlation_in = (feat01.unsqueeze(2) * feat01.unsqueeze(2)).sum(
+                    1
+                ) / (
+                    c**0.5
+                )  # [vB, D, H, W]
+                raw_correlation_in_lists.append(raw_correlation_in)
+
             # average all cost volumes
             raw_correlation_in = torch.mean(
                 torch.stack(raw_correlation_in_lists, dim=0), dim=0, keepdim=False
@@ -447,7 +506,7 @@ class PixelGaussian360Loc(BaseModule):
             else:
                 full_grid_expanded = full_grid
                 patch_grid_expanded = patch_grid
-            depths_in_curr = F.grid_sample(depths_in_fullres, full_grid_expanded, padding_mode="border")
+            depths_in_curr = self._sample_prior_depth(depths_in_fullres, full_grid_expanded)
             origins_curr = F.grid_sample(origins_fullres, full_grid_expanded, padding_mode="border")
             directions_curr = F.grid_sample(directions_fullres, full_grid_expanded, padding_mode="border")
             raw_gaussians = F.grid_sample(raw_gaussians, patch_grid, padding_mode="border")
@@ -562,7 +621,7 @@ class PixelGaussian360Loc(BaseModule):
             multiplier = self.get_scale_multiplier(pixel_size)
             scales_new = scales_new * depth_pred * multiplier[..., None]
 
-            gaussians_final = torch.cat([means, rgbs, opacities, rotations, scales_new], dim=-1)
+            gaussians_final = self._assemble_gaussians(means, rgbs, opacities, rotations, scales_new, extrinsics_in)
 
             # Handle features for multiple gaussians per pixel
             if self.gaussians_per_pixel > 1:

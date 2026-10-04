@@ -16,6 +16,7 @@ from torch import Tensor
 from ..utils.ops import get_ray_directions, get_rays
 from torch.nn.init import normal_
 from .geometry import sample_image_grid, fibonacci_sphere_grid, pad_pano, unpad_pano
+from ..utils.quaternion import compose_quaternion_c2w
 
 @MODELS.register_module()
 class PixelGaussian512(BaseModule):
@@ -25,11 +26,24 @@ class PixelGaussian512(BaseModule):
                  patchs_height=1,
                  patchs_width=1,
                  gh_cnn_layers=3,
+                 rotate_gaussians_to_world=False,
+                 pixel_depth_sampling="bilinear",
                  **kwargs,
                  ):
+        """
+        rotate_gaussians_to_world: D4 switch (default off = released code); rotate the
+            camera-frame quaternions by the c2w rotation of their view (forward then
+            needs extrinsics_in=c2w).
+        pixel_depth_sampling: D9 switch; grid_sample mode used to read the depth prior
+            at the Gaussian sample points, "bilinear" (default = released code) or "nearest".
+        """
 
         super().__init__()
 
+        self.rotate_gaussians_to_world = bool(rotate_gaussians_to_world)
+        if pixel_depth_sampling not in ("bilinear", "nearest"):
+            raise ValueError(f"pixel_depth_sampling must be 'bilinear' or 'nearest', got {pixel_depth_sampling!r}")
+        self.pixel_depth_sampling = pixel_depth_sampling
         feature_channels_list = [128, 96, 64, 32]
 
         # gs_channels = 1 + 1 + 3 + 4 + 3 # offset, opacity, scale, rotation, rgb
@@ -183,8 +197,35 @@ class PixelGaussian512(BaseModule):
         # must be called after forward
         self.padded_cache = [{} for _ in range(self.gh_stages)]
 
-    def forward(self, img, img_feats, depths_in, confs_in, pluckers_in, origins_in, directions_in, patch_idx=0, status="train"):
-        """Forward training function."""
+    def _sample_prior_depth(self, depths_in_fullres, grid):
+        """Read the depth prior at the Gaussian sample points (D9 pixel_depth_sampling)."""
+        if self.pixel_depth_sampling == "bilinear":
+            return F.grid_sample(depths_in_fullres, grid, padding_mode="border")
+        return F.grid_sample(depths_in_fullres, grid, mode=self.pixel_depth_sampling, padding_mode="border")
+
+    def _assemble_gaussians(self, means, rgbs, opacities, rotations, scales, extrinsics):
+        """Concatenate the world-frame Gaussians [B, V*N, 14].
+
+        D4 (rotate_gaussians_to_world): the quaternions [B, V*N, 4], view-major like the
+        means, are rotated by the c2w rotation of their view, extrinsics[..., :3, :3]
+        ([B, V, 4, 4] c2w, the poses the input rays were built with).
+        """
+        if self.rotate_gaussians_to_world:
+            rotations = rearrange(rotations, "b (v m) c -> b v m c", v=extrinsics.shape[1])
+            rotations = compose_quaternion_c2w(rotations, extrinsics[..., :3, :3])
+            rotations = rearrange(rotations, "b v m c -> b (v m) c")
+        return torch.cat([means, rgbs, opacities, rotations, scales], dim=-1)
+
+    def forward(self, img, img_feats, depths_in, confs_in, pluckers_in, origins_in, directions_in, patch_idx=0, status="train", *, extrinsics_in=None):
+        """Forward training function.
+
+        extrinsics_in: keyword-only c2w [B, V, 4, 4] of the input views (the poses the
+        rays origins_in / directions_in were built with); used, and required, only when
+        rotate_gaussians_to_world is on.
+        """
+        if self.rotate_gaussians_to_world and extrinsics_in is None:
+            raise ValueError("PixelGaussian512(rotate_gaussians_to_world=True) needs "
+                             "forward(..., extrinsics_in=<c2w [B, V, 4, 4]>)")
         bs, v, _, _, _ = img.shape
 
         images_fullres = rearrange(img, "b v c h w -> (b v) c h w")
@@ -244,7 +285,7 @@ class PixelGaussian512(BaseModule):
 
             patch_grid = repeat(self.map_patch_xy(xy, stage_idx, patch_idx), "n xy -> bv n 1 xy", bv=bs*v)
             
-            depths_in_curr = F.grid_sample(depths_in_fullres, full_grid, padding_mode="border")
+            depths_in_curr = self._sample_prior_depth(depths_in_fullres, full_grid)
             depths_in_curr = rearrange(depths_in_curr, "(b v) c n 1 -> b v n c", v=v, b=bs)
             origins_curr = F.grid_sample(origins_fullres, full_grid, padding_mode="border")
             origins_curr = rearrange(origins_curr, "(b v) c n 1 -> b v n c", v=v, b=bs)
@@ -287,7 +328,7 @@ class PixelGaussian512(BaseModule):
             multiplier = self.get_scale_multiplier(pixel_size)
             scales_new = scales_new * depth_pred * multiplier[..., None]
 
-            gaussians_final = torch.cat([means, rgbs, opacities, rotations, scales_new], dim=-1)
+            gaussians_final = self._assemble_gaussians(means, rgbs, opacities, rotations, scales_new, extrinsics_in)
             gaussians_stage = {
                 "gaussians": gaussians_final,
                 "features": rearrange(raw_gaussians, "b v n c -> b (v n) c", b=bs, v=v).contiguous(),

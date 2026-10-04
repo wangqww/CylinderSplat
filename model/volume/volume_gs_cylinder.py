@@ -6,7 +6,6 @@ from mmengine.model import BaseModule
 from mmengine.registry import MODELS
 import warnings
 from einops import rearrange
-from vis_feat import single_features_to_RGB, visualize_counts_as_heatmap, visualize_counts_as_polar_heatmap, features_to_blocky_heatmap
 
 @MODELS.register_module()
 class VolumeGaussianCylinder(BaseModule):

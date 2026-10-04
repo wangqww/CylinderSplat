@@ -4,9 +4,9 @@ from mmengine.model import BaseModule
 from mmengine.registry import MODELS
 from sample_anchors import sample_concentrating_sphere, project_onto_planes
 import math
-from vis_feat import single_features_to_RGB
 import numpy as np
 import matplotlib.pyplot as plt
+from .theta_periodic import circular_pad_width, wrap_grid_x
 
 def sigmoid_scaling(scaling:torch.Tensor, lower_bound=0.005, upper_bound=0.02):
     sig = torch.sigmoid(scaling)
@@ -40,13 +40,94 @@ def vis_sample_points(pixel_locs, depths, W, H):    # 4. 准备绘图数据 (将
     plt.savefig('spherical_projection_visualization.png', dpi=300, bbox_inches='tight')
     plt.close()
 
+class VisibilitySoftmaxColor(nn.Module):
+    """D7 colour head: a shared per-view encoder, a visibility-weighted softmax over
+    the views, then the colour MLP. Works for any number of views.
+
+    View k's 36 inputs are one slot of the concat head (3x3 RGB window + the
+    visibility cue, interleaved per tap). Its weight is
+    softmax_k(-exp(log_beta) * |vis_k|) over the views that see the point, where
+    vis_k = projected distance - sampled depth prior, so the views whose depth
+    prior agrees with the Gaussian dominate.
+    """
+
+    def __init__(self, view_dims=36, hidden_dims=128):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(view_dims, hidden_dims, bias=True),
+            nn.LeakyReLU()
+        )
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dims, hidden_dims, bias=True),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dims, 3, bias=True),
+            nn.Sigmoid()
+        )
+        self.log_beta = nn.Parameter(torch.zeros(1))
+
+    def forward(self, per_view_feat, visibility, valid):
+        """per_view_feat [bs, num_points, view, 36], visibility [bs, num_points, view],
+        valid [bs, num_points, view] (bool) -> colour [bs, num_points, 3]"""
+        logits = -self.log_beta.exp() * visibility.abs()
+        logits = logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
+        weights = torch.softmax(logits, dim=-1)
+        feat = (self.encoder(per_view_feat) * weights.unsqueeze(-1)).sum(dim=-2)
+        return self.head(feat)
+
+# gaussian_to_color_vis.<name> <- gaussian_to_color.<name> (D7 initialisation)
+_COLOR_VIS_FROM_CONCAT = (
+    ('encoder.0.weight', '0.weight'),  # view-slot-0 columns only
+    ('encoder.0.bias', '0.bias'),
+    ('head.0.weight', '2.weight'),
+    ('head.0.bias', '2.bias'),
+    ('head.2.weight', '4.weight'),
+    ('head.2.bias', '4.bias'),
+)
+
+def _fill_color_vis_from_concat(module, state_dict, prefix, *args):
+    """load_state_dict pre-hook (D7). When the incoming state dict has no visibility
+    head of its own -- the gaussian_to_color_vis names are absent, or they are this
+    module's current tensors while the concat head comes from elsewhere (the
+    `sd = model.state_dict(); sd.update(ckpt)` merge pattern) -- fill them from the
+    incoming concat head gaussian_to_color.*, i.e. from the loaded checkpoint."""
+    vis, src = prefix + 'gaussian_to_color_vis.', prefix + 'gaussian_to_color.'
+    if src + '0.weight' not in state_dict:
+        return
+    key = vis + 'encoder.0.weight'
+    if key in state_dict:
+        own_vis = state_dict[key].data_ptr() == module.gaussian_to_color_vis.encoder[0].weight.data_ptr()
+        own_src = state_dict[src + '0.weight'].data_ptr() == module.gaussian_to_color[0].weight.data_ptr()
+        if not own_vis or own_src:
+            return
+    view_dims = module.gaussian_to_color_vis.encoder[0].in_features
+    for dst_name, src_name in _COLOR_VIS_FROM_CONCAT:
+        t = state_dict[src + src_name]
+        if dst_name == 'encoder.0.weight':
+            t = t[:, :view_dims]
+        state_dict[vis + dst_name] = t.detach().clone()
+    state_dict[vis + 'log_beta'] = module.gaussian_to_color_vis.log_beta.detach().clone()
+
 @MODELS.register_module()
 class VolumeGaussianDecoderCylinder(BaseModule):
+    """Cylindrical triplane -> volume Gaussians.
+
+    Switches (defaults = the released behaviour):
+        theta_periodic (D5): the colour window and the depth-prior read wrap
+            horizontally across the panorama seam.
+        cell_center_anchor (D6): anchors at cell centres with +-1/2-cell tanh
+            offsets (a Gaussian stays in its cell) and r >= 0, instead of
+            lower-corner anchors with +-1-cell offsets.
+        rgb_retrieval (D7): 'concat' (the per-slot concat MLP) or
+            'visibility_softmax' (`VisibilitySoftmaxColor` under
+            gaussian_to_color_vis.*, initialised from the concat head; the concat
+            head is kept frozen for checkpoint compatibility).
+    """
     def __init__(
         self, tpv_theta, tpv_r, tpv_z, pc_range, gs_dim=14,
         in_dims=64, hidden_dims=128, out_dims=None, num_cams=6,
         scale_theta=2, scale_r=2, scale_z=2, gpv=4, offset_max=None, scale_max=None,
-        use_checkpoint=False
+        use_checkpoint=False, theta_periodic=False, cell_center_anchor=False,
+        rgb_retrieval='concat'
     ):
         super().__init__()
         self.tpv_theta = tpv_theta
@@ -94,6 +175,31 @@ class VolumeGaussianDecoderCylinder(BaseModule):
         scale_cylinder = self.get_scale_cylinder(tpv_theta * scale_theta, tpv_r * scale_r, tpv_z * scale_z, pc_range[0], pc_range[3], pc_range[2], pc_range[5])
         self.register_buffer('scale_cylinder', scale_cylinder)
         # self.register_buffer('anchors_coordinates', anchors_coordinates[combined_mask])
+
+        self.theta_periodic = theta_periodic
+        self.cell_center_anchor = cell_center_anchor
+        self.rgb_retrieval = rgb_retrieval
+        if rgb_retrieval == 'visibility_softmax':
+            self.gaussian_to_color_vis = VisibilitySoftmaxColor(36, 128)
+            self.init_color_vis_from_concat()
+            # unused in forward: kept (frozen) so checkpoints keep their keys and as the init source
+            self.gaussian_to_color.requires_grad_(False)
+            self._register_load_state_dict_pre_hook(_fill_color_vis_from_concat, with_module=True)
+        elif rgb_retrieval != 'concat':
+            raise ValueError(f"rgb_retrieval must be 'concat' or 'visibility_softmax', got {rgb_retrieval!r}")
+
+    @torch.no_grad()
+    def init_color_vis_from_concat(self):
+        """D7: copy the concat head into gaussian_to_color_vis where shapes allow. Runs at
+        construction; a checkpoint load fills it through a load_state_dict pre-hook. Call
+        it again after loading weights by any other route than load_state_dict."""
+        vis = self.gaussian_to_color_vis
+        for dst_name, src_name in _COLOR_VIS_FROM_CONCAT:
+            dst = vis.get_parameter(dst_name)
+            src = self.gaussian_to_color.get_parameter(src_name)
+            if dst_name == 'encoder.0.weight':
+                src = src[:, :dst.shape[1]]
+            dst.copy_(src)
 
     def normalize(self, pixel_locations, h, w):
         resize_factor = torch.tensor([w-1., h-1.]).to(pixel_locations.device)[None, None, None, :]
@@ -194,12 +300,23 @@ class VolumeGaussianDecoderCylinder(BaseModule):
         delta_theta = 2 * np.pi * delta_T / THETA
 
         # reference points in 3D space
-        rs = (pc_range[3] - pc_range[0]) * torch.linspace(0, R, R+1, dtype=dtype,
-                            device=device)[:-1].view(-1, 1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / R + offset_R 
-        thetas = 2 * torch.pi * torch.linspace(0, THETA, THETA+1, dtype=dtype,
-                            device=device)[:-1].view(1, -1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / THETA + offset_T
-        zs = (pc_range[5] - pc_range[2]) * torch.linspace(0, Z, Z+1, dtype=dtype,
-                            device=device)[:-1].view(1, 1, -1).expand(R, THETA, Z)[None,:,:,:,None,None] / Z + offset_Z
+        if self.cell_center_anchor:
+            # D6: anchors at cell centres (index + 0.5); forward scales the offsets to
+            # +-1/2 cell, so every Gaussian stays inside its cell; r >= 0
+            rs = (pc_range[3] - pc_range[0]) * (torch.linspace(0, R, R+1, dtype=dtype,
+                                device=device)[:-1] + 0.5).view(-1, 1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / R + offset_R
+            rs = torch.clamp(rs, min=0)
+            thetas = 2 * torch.pi * (torch.linspace(0, THETA, THETA+1, dtype=dtype,
+                                device=device)[:-1] + 0.5).view(1, -1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / THETA + offset_T
+            zs = (pc_range[5] - pc_range[2]) * (torch.linspace(0, Z, Z+1, dtype=dtype,
+                                device=device)[:-1] + 0.5).view(1, 1, -1).expand(R, THETA, Z)[None,:,:,:,None,None] / Z + offset_Z
+        else:
+            rs = (pc_range[3] - pc_range[0]) * torch.linspace(0, R, R+1, dtype=dtype,
+                                device=device)[:-1].view(-1, 1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / R + offset_R 
+            thetas = 2 * torch.pi * torch.linspace(0, THETA, THETA+1, dtype=dtype,
+                                device=device)[:-1].view(1, -1, 1).expand(R, THETA, Z)[None,:,:,:,None,None] / THETA + offset_T
+            zs = (pc_range[5] - pc_range[2]) * torch.linspace(0, Z, Z+1, dtype=dtype,
+                                device=device)[:-1].view(1, 1, -1).expand(R, THETA, Z)[None,:,:,:,None,None] / Z + offset_Z
         # rs = torch.clamp(rs, min=0)
         xs = -torch.sin(thetas) * rs
         ys = zs + pc_range[2] 
@@ -266,11 +383,19 @@ class VolumeGaussianDecoderCylinder(BaseModule):
             & (project_depth > 0.0)
         ) # [bs, view, num_points]
 
-        depths_sampled = F.grid_sample(
-            source_depths.reshape(b*v, 1, h, w), 
-            self.normalize(pixel_locations.view(b*v, 1, -1, 2), h, w), 
-            align_corners=False
-        )
+        if self.theta_periodic:
+            # D5: read the depth prior with horizontal (theta) wrap
+            depths_sampled = F.grid_sample(
+                circular_pad_width(source_depths.reshape(b*v, 1, h, w)),
+                wrap_grid_x(self.normalize(pixel_locations.view(b*v, 1, -1, 2), h, w), w),
+                align_corners=False
+            )
+        else:
+            depths_sampled = F.grid_sample(
+                source_depths.reshape(b*v, 1, h, w), 
+                self.normalize(pixel_locations.view(b*v, 1, -1, 2), h, w), 
+                align_corners=False
+            )
 
         depths_sampled = depths_sampled.squeeze().view(b, v, -1) # [bs, view, num_points]
         retrived_depth = depths_sampled.masked_fill(mask_in_front==0, 0)
@@ -288,15 +413,28 @@ class VolumeGaussianDecoderCylinder(BaseModule):
         mask_in_front = mask_in_front.unsqueeze(dim=3).repeat(1, 1, 1, local_h*local_w).contiguous() # [bs, view, num_points, local_h*local_w]
         mask_in_front = mask_in_front.view(b, v, -1) # [bs, view, num_points*local_h*local_w]
 
-        rgbs_sampled = F.grid_sample(source_imgs.reshape(b*v,3,h,w), 
-                                     normalized_pixel_locations.view(b*v,1,-1,2), 
-                                     align_corners=False
-        ) # [bs*v, 3, num_points*local_h*local_w]
+        if self.theta_periodic:
+            # D5: colour window with horizontal (theta) wrap
+            rgbs_sampled = F.grid_sample(circular_pad_width(source_imgs.reshape(b*v,3,h,w)),
+                                         wrap_grid_x(normalized_pixel_locations.view(b*v,1,-1,2), w),
+                                         align_corners=False
+            ) # [bs*v, 3, num_points*local_h*local_w]
+        else:
+            rgbs_sampled = F.grid_sample(source_imgs.reshape(b*v,3,h,w), 
+                                         normalized_pixel_locations.view(b*v,1,-1,2), 
+                                         align_corners=False
+            ) # [bs*v, 3, num_points*local_h*local_w]
         
         rgb_sampled = rgbs_sampled.view(b, v, 3, -1) # [bs, view, 3, num_points*local_h*local_w]
         rgb_sampled = rgb_sampled.permute(0, 1, 3, 2) # [bs, view, num_points*local_h*local_w, 3]
         rgb = rgb_sampled.masked_fill(mask_in_front.unsqueeze(-1)==0, 0) # [bs, view, num_points*local_h*local_w, 3]
         rgb = rgb.view(b,v,-1,local_h*local_w,3).permute(0,2,1,3,4) # [bs, num_points, view, local_h*local_w, 3]
+
+        if self.rgb_retrieval == 'visibility_softmax':
+            # D7: one concat slot per view, same layout [bs, num_points, view, local_h*local_w*4]
+            per_view_feat = torch.concat([rgb, visibility_map], dim=-1).view(b, -1, v, local_h*local_w*4)
+            valid = mask_in_front.view(b, v, -1, local_h*local_w)[..., 0].permute(0, 2, 1) # [bs, num_points, view]
+            return self.gaussian_to_color_vis(per_view_feat, visibility_map[..., 0, 0], valid)
 
         # cam_pos = torch.inverse(source_cams)[..., :3, 3] # [bs, view, 3]
         # ob_view = xyz.unsqueeze(1) - cam_pos.unsqueeze(2) # [bs, view, num_points, 3]
@@ -352,9 +490,15 @@ class VolumeGaussianDecoderCylinder(BaseModule):
             # gaussians = gaussians.view(bs, num_points, self.gpv, -1)
             gaussians = gaussians.view(bs, w, h, z, self.gpv, -1)
 
-        gs_offsets_r = self.pos_act(gaussians[..., :1]) * self.offset_max[0] # r
-        gs_offsets_theta = self.pos_act(gaussians[..., 1:2]) * self.offset_max[1] # theta
-        gs_offsets_z = self.pos_act(gaussians[..., 2:3]) * self.offset_max[2] # z
+        if self.cell_center_anchor:
+            # D6: symmetric +-1/2-cell offsets around the cell centre
+            gs_offsets_r = self.pos_act(gaussians[..., :1]) * (0.5 * self.offset_max[0]) # r
+            gs_offsets_theta = self.pos_act(gaussians[..., 1:2]) * (0.5 * self.offset_max[1]) # theta
+            gs_offsets_z = self.pos_act(gaussians[..., 2:3]) * (0.5 * self.offset_max[2]) # z
+        else:
+            gs_offsets_r = self.pos_act(gaussians[..., :1]) * self.offset_max[0] # r
+            gs_offsets_theta = self.pos_act(gaussians[..., 1:2]) * self.offset_max[1] # theta
+            gs_offsets_z = self.pos_act(gaussians[..., 2:3]) * self.offset_max[2] # z
 
         scale_x = self.scale_act(gaussians[..., 3:4])
         scale_y = self.scale_act(gaussians[..., 4:5])

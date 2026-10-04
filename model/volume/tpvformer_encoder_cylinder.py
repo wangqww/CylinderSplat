@@ -5,14 +5,21 @@ from mmengine.registry import MODELS
 from torch import nn
 from torch.nn.init import normal_
 import matplotlib.pyplot as plt
-from vis_feat import show_vis_points
 from .cross_view_hybrid_attention import TPVCrossViewHybridAttention
 from .image_cross_attention import TPVMSDeformableAttention3D
+from .theta_periodic import conv2d_theta_circular
 from einops import rearrange
 
 
 @MODELS.register_module()
 class TPVFormerEncoderCylinder(TransformerLayerSequence):
+    """Cylindrical triplane encoder.
+
+    theta_periodic (D5, default False): treat theta as periodic -- circular
+    theta padding in the thetar / ztheta projection convs, wrapped theta / u
+    sampling in the plane self-attention and the image cross-attention, and
+    rz-plane image pillars spread uniformly over [0, 2pi).
+    """
 
     def __init__(self,
                  tpv_theta=200,
@@ -28,7 +35,8 @@ class TPVFormerEncoderCylinder(TransformerLayerSequence):
                  num_layers=5,
                  transformerlayers=None,
                  positional_encoding=None,
-                 return_intermediate=False):
+                 return_intermediate=False,
+                 theta_periodic=False):
         super().__init__(transformerlayers, num_layers)
 
         self.tpv_theta = tpv_theta
@@ -67,6 +75,22 @@ class TPVFormerEncoderCylinder(TransformerLayerSequence):
         cross_view_ref_points = self.get_cross_view_ref_points(
             tpv_theta, tpv_r, tpv_z, num_points_in_pillar_cross_view)
         self.register_buffer('cross_view_ref_points', cross_view_ref_points)
+
+        self.theta_periodic = theta_periodic
+        if theta_periodic:
+            # D5: rz pillars at the centres of num_points_in_pillar[2] equal theta bins
+            # over [0, 2pi) (ref_3d_rz stops ~0.5 rad short of the seam on both sides).
+            # Non-persistent: the state-dict keys and the stored ref_3d_rz stay as
+            # today, and a checkpoint load cannot overwrite these pillars.
+            ref_3d_rz_periodic = self.get_reference_points(tpv_r, tpv_z, num_points_in_pillar[2],
+                                                           num_points_in_pillar[2])
+            ref_3d_rz_periodic = ref_3d_rz_periodic.permute(3, 0, 1, 2)[[1, 2, 0]]  # change to x,y,z
+            ref_3d_rz_periodic = ref_3d_rz_periodic.permute(1, 2, 3, 0)
+            self.register_buffer('ref_3d_rz_periodic', ref_3d_rz_periodic, persistent=False)
+            for m in self.modules():
+                if isinstance(m, TPVMSDeformableAttention3D) or isinstance(
+                        m, TPVCrossViewHybridAttention):
+                    m.theta_periodic = True
 
         # positional encoding
         self.positional_encoding = MODELS.build(positional_encoding)
@@ -286,8 +310,13 @@ class TPVFormerEncoderCylinder(TransformerLayerSequence):
         # add projected feats to tpv queries
         if project_feats[0] is not None and project_feats[1] is not None and project_feats[2] is not None:
             project_feats_thetar, project_feats_ztheta, project_feats_rz = project_feats
-            project_feats_thetar = rearrange(self.project_transform_thetar(project_feats_thetar), "b c h w -> b (h w) c")
-            project_feats_ztheta = rearrange(self.project_transform_ztheta(project_feats_ztheta), "b c z h -> b (z h) c")
+            if self.theta_periodic:
+                # D5: circular padding along theta (rows of thetar, columns of ztheta)
+                project_feats_thetar = rearrange(conv2d_theta_circular(self.project_transform_thetar, project_feats_thetar, 2), "b c h w -> b (h w) c")
+                project_feats_ztheta = rearrange(conv2d_theta_circular(self.project_transform_ztheta, project_feats_ztheta, 3), "b c z h -> b (z h) c")
+            else:
+                project_feats_thetar = rearrange(self.project_transform_thetar(project_feats_thetar), "b c h w -> b (h w) c")
+                project_feats_ztheta = rearrange(self.project_transform_ztheta(project_feats_ztheta), "b c z h -> b (z h) c")
             project_feats_rz = rearrange(self.project_transform_rz(project_feats_rz), "b c w z -> b (w z) c")
             tpv_queries_thetar = tpv_queries_thetar + project_feats_thetar
             tpv_queries_ztheta = tpv_queries_ztheta + project_feats_ztheta
@@ -323,6 +352,8 @@ class TPVFormerEncoderCylinder(TransformerLayerSequence):
 
         reference_points_cams, tpv_masks = [], []
         ref_3ds = [self.ref_3d_thetar, self.ref_3d_ztheta, self.ref_3d_rz]
+        if self.theta_periodic:
+            ref_3ds[2] = self.ref_3d_rz_periodic
         for ref_3d in ref_3ds:
             reference_points_cam, tpv_mask = self.pano_point_sampling_cylinder(
                 ref_3d, self.pc_range,

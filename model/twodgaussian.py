@@ -9,18 +9,30 @@ import numpy as np
 
 renderer_type = 'vanilla' # "vanilla" or "panorama"
 
-from diff_surfel_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
+# The CUDA rasterizers used here are optional packages (diff-surfel-rasterization for
+# the 2D Gaussians; diff-gaussian-rasterization, or pano_gaussian, for the 3D BEV
+# render). They are imported on first use by _load_rasterizers(), so importing this
+# module does not require them.
+GaussianRasterizationSettings = None
+GaussianRasterizer = None
+ThreeDGaussianRasterizationSettings = None
+ThreeDGaussianRasterizer = None
 
-if renderer_type == 'panorama':
-    from pano_gaussian import GaussianRasterizationSettings as ThreeDGaussianRasterizationSettings
-    from pano_gaussian import GaussianRasterizer as ThreeDGaussianRasterizer
 
-else:
-    from diff_gaussian_rasterization import GaussianRasterizationSettings as ThreeDGaussianRasterizationSettings
-    from diff_gaussian_rasterization import GaussianRasterizer as ThreeDGaussianRasterizer
+def _load_rasterizers():
+    global GaussianRasterizationSettings, GaussianRasterizer
+    global ThreeDGaussianRasterizationSettings, ThreeDGaussianRasterizer
+    if GaussianRasterizer is not None and ThreeDGaussianRasterizer is not None:
+        return
+    import diff_surfel_rasterization as surfel_rasterization
+    if renderer_type == 'panorama':
+        import pano_gaussian as three_d_rasterization
+    else:
+        import diff_gaussian_rasterization as three_d_rasterization
+    GaussianRasterizationSettings = surfel_rasterization.GaussianRasterizationSettings
+    GaussianRasterizer = surfel_rasterization.GaussianRasterizer
+    ThreeDGaussianRasterizationSettings = three_d_rasterization.GaussianRasterizationSettings
+    ThreeDGaussianRasterizer = three_d_rasterization.GaussianRasterizer
 
 from pano2cube import Equirec2Cube, Cube2Equirec
 from .cam_utils import MiniCam
@@ -151,6 +163,7 @@ class Renderer(nn.Module):
         
     def set_rasterizer(self, viewpoint_camera, scaling_modifier=1.0, device="cuda"):
         # Set up rasterization configuration
+        _load_rasterizers()
 
         raster_settings = GaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
@@ -355,6 +368,7 @@ class GaussianRenderer:
         if fovy is None:
             fovy = fovx
 
+        _load_rasterizers()
         device = gaussians.device
         B, V = c2w.shape[:2]
 
@@ -563,6 +577,7 @@ class GaussianRenderer:
         look_axis: int = 1,
         bev_width: int = 256,
     ):
+        _load_rasterizers()
         device = gaussians.device
         B = gaussians.shape[0]
         images = []

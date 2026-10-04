@@ -104,8 +104,28 @@ class Dataset360Loc(IterableDataset):
     def __init__(
         self,
         stage,
+        interleave=False,
+        pcc_reference="depth_metric",
     ) -> None:
+        """stage: 'train' (concourse, hall, piatrium) or another stage ('val' = the held-out atrium).
+
+        Options (the defaults reproduce the released loader):
+            interleave (train only; switch loc360_interleave): yield one globally shuffled stream of
+                (sequence, sample) pairs instead of the sequences one after another; each sequence still
+                gives times_per_scene samples per epoch. Frames are decoded on first use and kept as
+                uint8 (to_tensor's exact values), so a persistent worker decodes every frame once.
+            pcc_reference (evaluation stages only): 'depth_metric' (the UniK3D prior, as released) or
+                'depth_anywhere' (the Depth Anywhere pseudo-GT the paper's PCC uses) as outputs['depth'].
+        """
         super().__init__()
+        if interleave and stage != "train":
+            raise ValueError(f"interleave applies to the train split only, not stage {stage!r}")
+        if pcc_reference not in ("depth_metric", "depth_anywhere"):
+            raise ValueError(f"pcc_reference must be 'depth_metric' or 'depth_anywhere', got {pcc_reference!r}")
+        if pcc_reference != "depth_metric" and stage == "train":
+            raise ValueError("pcc_reference applies to evaluation stages only")
+        self.interleave = interleave
+        self.pcc_reference = pcc_reference
         self.stage = stage
         self.to_tensor = tf.ToTensor()
         # NOTE: update near & far; remember to DISABLE `apply_bounds_shim` in encoder
@@ -149,6 +169,9 @@ class Dataset360Loc(IterableDataset):
         return sum(len(e) for e in extrinsics)
 
     def __iter__(self):
+        if self.interleave:
+            yield from self._iter_interleaved()
+            return
         # Chunks must be shuffled here (not inside __init__) for validation to show
         # random chunks.
         if self.stage in ("train"):
@@ -183,106 +206,155 @@ class Dataset360Loc(IterableDataset):
                     break
 
 
-                # Resize the world to make the baseline 1.
-                context_extrinsics = extrinsics_orig[context_indices]
-                target_extrinsics = extrinsics_orig[target_indices]
-                ref_extrinsics = target_extrinsics[:1]
-                target_extrinsics_relative = torch.inverse(ref_extrinsics) @ target_extrinsics
-                context_extrinsics_relative = torch.inverse(ref_extrinsics) @ context_extrinsics
-                # target_extrinsics_relative = w2w.T @ target_extrinsics_relative @ w2w
-
-                # Load the images.
-                if self.stage == "train":
-                    context_images = images[context_indices]
-                    target_images = images[target_indices]
-                else:
-                    context_images_path = [example_path / 'image' / frames[i] for i in context_indices]
-                    context_images = self.convert_images(context_images_path)
-                    target_images_path = [example_path / 'image' / frames[i] for i in target_indices]
-                    target_images = self.convert_images(target_images_path)
+                yield self._make_sample(example_path, frames, extrinsics_orig, context_indices, target_indices,
+                                        images=images if self.stage == "train" else None,
+                                        images_path=images_path if self.stage == "train" else None)
                 
-                input_dict = {"rgb": context_images}
+    def _iter_interleaved(self):
+        """loc360_interleave: every (sequence, i) pair of the epoch in one random order.
 
-                # Load the depth.
-                # relative depth path
-                index = torch.cat((context_indices, target_indices))
-                depths_path = []
-                depths_m_path = []
-                confs_m_path = []
-                if self.stage == "train":
-                    for i in index:
-                        depths_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
-                        depths_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
-                        confs_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_conf.npy'))
-                else:
-                    depths_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
-                    depths_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
-                    confs_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_conf.npy') for i in index]
+        The released stream (above) shuffles only the sequence order and then yields all
+        times_per_scene samples of one sequence before the next, so ~times_per_scene / (ranks x batch)
+        consecutive optimizer steps (and the BatchNorm running statistics a checkpoint saves) come
+        from a single sequence. Here the pairs of all sequences are permuted together (torch's RNG of
+        the worker, like the sequence shuffle above); the per-sample code is the same.
+        """
+        data = list(self.data)
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            data = [example for data_idx, example in enumerate(data)
+                    if data_idx % worker_info.num_workers == worker_info.id]
+        sequences = []
+        for example_path in data:
+            frames, extrinsics_orig = self.load_extrinsics(example_path)
+            images_path = [example_path / 'image' / frame for frame in frames]
+            sequences.append((example_path, frames, extrinsics_orig, images_path))
+        pairs = [(s, i) for s in range(len(sequences)) for i in range(self.times_per_scene)]
+        for k in torch.randperm(len(pairs)).tolist():
+            s, i = pairs[k]
+            example_path, frames, extrinsics_orig, images_path = sequences[s]
+            scene = f"{example_path.parts[-3]}-{example_path.parts[-1]}"
+            context_indices, target_indices = two_sample(
+                scene,
+                extrinsics_orig,
+                self.times_per_scene,
+                stage=self.stage,
+                i=i,
+            )
+            yield self._make_sample(example_path, frames, extrinsics_orig, context_indices, target_indices,
+                                    images=_FrameCache(self, images_path), images_path=images_path)
 
-                target_index = len(context_indices)
+    def _make_sample(self, example_path, frames, extrinsics_orig, context_indices, target_indices,
+                     images=None, images_path=None):
+        """One sample. Train: `images` indexes the sequence's frames (the stacked sequence, or the
+        loc360_interleave frame cache) and `images_path` lists their files; other stages read files."""
+        # Resize the world to make the baseline 1.
+        context_extrinsics = extrinsics_orig[context_indices]
+        target_extrinsics = extrinsics_orig[target_indices]
+        ref_extrinsics = target_extrinsics[:1]
+        target_extrinsics_relative = torch.inverse(ref_extrinsics) @ target_extrinsics
+        context_extrinsics_relative = torch.inverse(ref_extrinsics) @ context_extrinsics
+        # target_extrinsics_relative = w2w.T @ target_extrinsics_relative @ w2w
 
-                context_depths = self.convert_depths(depths_path[:target_index])
-                target_depths = self.convert_depths(depths_path[target_index:])
-                # metric depth path
-                # depths_path = [str(scene_path / v / 'depth.png') for v in views]
-                context_m_depths = self.convert_depths(depths_m_path[:target_index])
-                target_m_depths = self.convert_depths(depths_m_path[target_index:])
+        # Load the images.
+        if self.stage == "train":
+            context_images = images[context_indices]
+            target_images = images[target_indices]
+        else:
+            context_images_path = [example_path / 'image' / frames[i] for i in context_indices]
+            context_images = self.convert_images(context_images_path)
+            target_images_path = [example_path / 'image' / frames[i] for i in target_indices]
+            target_images = self.convert_images(target_images_path)
+        
+        input_dict = {"rgb": context_images}
 
-                context_m_confs = self.convert_depths(confs_m_path[:target_index])
-                target_m_confs = self.convert_depths(confs_m_path[target_index:])
+        # Load the depth.
+        # relative depth path
+        index = torch.cat((context_indices, target_indices))
+        depths_path = []
+        depths_m_path = []
+        confs_m_path = []
+        if self.stage == "train":
+            for i in index:
+                depths_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
+                depths_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_depth.npy'))
+                confs_m_path.append(str(images_path[i]).replace('image', 'depth_metric').replace('.jpg', '_conf.npy'))
+        else:
+            depths_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
+            depths_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_depth.npy') for i in index]
+            confs_m_path = [example_path / 'depth_metric' / frames[i].replace('.jpg', '_conf.npy') for i in index]
 
-                # context_depths = context_depths.float() / 1000
-                # target_depths = target_depths.float() / 1000
-                context_depths = context_depths.clamp(min=0.)
-                target_depths = target_depths.clamp(min=0.)
-                context_mask = (context_m_depths > self.near) & (context_m_depths < self.far)
-                target_mask = (target_m_depths > self.near) & (target_m_depths < self.far)
+        target_index = len(context_indices)
 
-                # process rays
-                output_fovxs = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
-                output_fovys = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
-                input_directions = output_directions = self.direction.unsqueeze(0)
-                
-                input_rays_o, input_rays_d = get_rays(
-                    input_directions, context_extrinsics_relative, keepdim=True, normalize=False)
-                output_rays_o, output_rays_d = get_rays(
-                                    output_directions, target_extrinsics_relative, keepdim=True, normalize=False)
-                fx, fy, cx, cy = 0.25, 0.5, 0.5, 0.5
-                
-                input_dict_pix = {
-                    "depth_m": context_m_depths, 
-                    "conf_m": context_m_confs,
-                    "ck": torch.zeros(1,3,3), 
-                    "c2w": context_extrinsics_relative,
-                    "cx": torch.tensor([cx]), 
-                    "cy": torch.tensor([cy]), 
-                    "fx": torch.tensor([fx]), 
-                    "fy": torch.tensor([fy]),
-                    "rays_o": input_rays_o, 
-                    "rays_d": input_rays_d
-                }
+        if self.pcc_reference == "depth_anywhere":
+            # PCC reference = Depth Anywhere pseudo-GT, read like the 160x320 loader
+            # (data/loc360_dataloader_double_all.py: the png through convert_images, then clamp)
+            depths_path = [example_path / 'depthanywhere' / frames[i].replace('.jpg', '_depth_anywhere.png') for i in index]
+            context_depths = self.convert_images(depths_path[:target_index], strict=True)
+            target_depths = self.convert_images(depths_path[target_index:], strict=True)
+        else:
+            context_depths = self.convert_depths(depths_path[:target_index])
+            target_depths = self.convert_depths(depths_path[target_index:])
+        # metric depth path
+        # depths_path = [str(scene_path / v / 'depth.png') for v in views]
+        context_m_depths = self.convert_depths(depths_m_path[:target_index])
+        target_m_depths = self.convert_depths(depths_m_path[target_index:])
 
-                input_dict_vol = {"w2i": torch.inverse(context_extrinsics_relative)}
+        context_m_confs = self.convert_depths(confs_m_path[:target_index])
+        target_m_confs = self.convert_depths(confs_m_path[target_index:])
 
-                output_dict = {
-                    "rgb": target_images, 
-                    "depth": target_depths,
-                    "depth_m": target_m_depths, 
-                    "conf_m": target_m_confs,
-                    "c2w": target_extrinsics_relative, 
-                    "fovx": output_fovxs, 
-                    "fovy": output_fovys, 
-                    "rays_o": output_rays_o,
-                    "rays_d": output_rays_d, 
-                }
+        # context_depths = context_depths.float() / 1000
+        # target_depths = target_depths.float() / 1000
+        context_depths = context_depths.clamp(min=0.)
+        target_depths = target_depths.clamp(min=0.)
+        context_mask = (context_m_depths > self.near) & (context_m_depths < self.far)
+        target_mask = (target_m_depths > self.near) & (target_m_depths < self.far)
 
-                yield {
-                    "outputs": output_dict,
-                    "inputs": input_dict,
-                    "inputs_pix": input_dict_pix,
-                    "inputs_vol": input_dict_vol,
-                }
-                
+        # process rays
+        output_fovxs = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
+        output_fovys = torch.deg2rad(torch.tensor([90], dtype=torch.float32)).repeat(len(target_indices))
+        input_directions = output_directions = self.direction.unsqueeze(0)
+        
+        input_rays_o, input_rays_d = get_rays(
+            input_directions, context_extrinsics_relative, keepdim=True, normalize=False)
+        output_rays_o, output_rays_d = get_rays(
+                            output_directions, target_extrinsics_relative, keepdim=True, normalize=False)
+        fx, fy, cx, cy = 0.25, 0.5, 0.5, 0.5
+        
+        input_dict_pix = {
+            "depth_m": context_m_depths, 
+            "conf_m": context_m_confs,
+            "ck": torch.zeros(1,3,3), 
+            "c2w": context_extrinsics_relative,
+            "cx": torch.tensor([cx]), 
+            "cy": torch.tensor([cy]), 
+            "fx": torch.tensor([fx]), 
+            "fy": torch.tensor([fy]),
+            "rays_o": input_rays_o, 
+            "rays_d": input_rays_d
+        }
+
+        input_dict_vol = {"w2i": torch.inverse(context_extrinsics_relative)}
+
+        output_dict = {
+            "rgb": target_images, 
+            "depth": target_depths,
+            "depth_m": target_m_depths, 
+            "conf_m": target_m_confs,
+            "c2w": target_extrinsics_relative, 
+            "fovx": output_fovxs, 
+            "fovy": output_fovys, 
+            "rays_o": output_rays_o,
+            "rays_d": output_rays_d, 
+        }
+
+        return {
+            "outputs": output_dict,
+            "inputs": input_dict,
+            "inputs_pix": input_dict_pix,
+            "inputs_vol": input_dict_vol,
+        }
+
     def convert_depths(
         self,
         depths,
@@ -300,7 +372,10 @@ class Dataset360Loc(IterableDataset):
     def convert_images(
         self,
         images,
+        strict=False,
     ):
+        # strict: raise on an unreadable file (the default prints and skips it, as released, which
+        # shifts every later frame of a stacked sequence against its pose)
         torch_images = []
         for image in images:
             try:
@@ -308,8 +383,26 @@ class Dataset360Loc(IterableDataset):
                 image = image.resize([self.width, self.height], Image.LANCZOS)
                 torch_images.append(self.to_tensor(image))
             except Exception as e:
+                if strict:
+                    raise
                 print(f"Error: {e}")
         return torch.stack(torch_images)
+
+    def frame_uint8(self, path):
+        """loc360_interleave: one frame resized like convert_images, cached as uint8 CHW.
+
+        to_tensor turns a uint8 PIL image into uint8 / 255 in float32, so `.float().div(255)` of the
+        cached tensor is bit-identical to convert_images([path])[0].
+        """
+        cache = self.__dict__.setdefault("_frame_cache", {})
+        key = str(path)
+        if key not in cache:
+            image = Image.open(path)
+            image = image.resize([self.width, self.height], Image.LANCZOS)
+            if image.mode != "RGB":
+                raise ValueError(f"{path}: expected an RGB image, got mode {image.mode}")
+            cache[key] = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).contiguous()
+        return cache[key]
     
     def convert_poses(
         self,
@@ -332,6 +425,18 @@ class Dataset360Loc(IterableDataset):
 
     def __len__(self) -> int:
         return len(self.data) * self.times_per_scene
+
+class _FrameCache:
+    """images[index] for one sequence, served from Dataset360Loc.frame_uint8 (loc360_interleave)."""
+
+    def __init__(self, dataset, images_path):
+        self.dataset = dataset
+        self.images_path = images_path
+
+    def __getitem__(self, indices):
+        return torch.stack([self.dataset.frame_uint8(self.images_path[int(i)]).float().div(255)
+                            for i in indices])
+
 
 def get_generator(seed):
     generator = Generator()
