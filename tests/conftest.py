@@ -28,9 +28,9 @@ def load_by_path(rel, name):
 
 
 def kept_configs():
-    """Every model config, repository-relative: configs/OmniScene/*.py and the release/ recipes."""
+    """Every model config, repository-relative: configs/OmniScene/*.py, the release/ recipes and the screen/ arms."""
     root = os.path.join(REPO_ROOT, "configs", "OmniScene")
-    paths = glob.glob(os.path.join(root, "*.py")) + glob.glob(os.path.join(root, "release", "*.py"))
+    paths = [path for sub in ("", "release", "screen") for path in glob.glob(os.path.join(root, sub, "*.py"))]
     return sorted(os.path.relpath(path, REPO_ROOT) for path in paths)
 
 

@@ -53,6 +53,20 @@ SCHEDULERS = {
                  "final_div_factor": "10000.0",
              }),
     ],
+    # The same OneCycle over a fixed step count from the config: the screen row.
+    "onecycle_steps": [
+        dict(target="scheduler", call="torch.optim.lr_scheduler.OneCycleLR",
+             args=["optimizer"],
+             kwargs={
+                 "max_lr": "cfg.lr",
+                 "total_steps": "cfg.onecycle_total_steps",
+                 "pct_start": "0.01",
+                 "cycle_momentum": "False",
+                 "anneal_strategy": "'cos'",
+                 "div_factor": "25.0",
+                 "final_div_factor": "10000.0",
+             }),
+    ],
     # Linear warm-up then cosine: the 160 and 512 rows.
     "warmup_cosine": [
         dict(target="warm_up", call="torch.optim.lr_scheduler.LinearLR",
@@ -228,6 +242,30 @@ ENTRIES = {
         validation="plain",
     ),
 }
+
+# ---------------------------------------------------------------------------
+# Fine-tune row: fine-tunes of a trained checkpoint on one GPU through
+# scripts/long_arm.sh. The mp3d_double_256 loaders on one process
+# (batch_size_train per step), a OneCycle over cfg.onecycle_total_steps (runs stop
+# at --max-steps with --save-final), no in-run validation (runs are evaluated with
+# evaluate.py). long_s = the LS recipe (20,000 steps from the released stage 3;
+# README, "LS fine-tune"), long_c0 = the same schedule with prune_invisible only (no lpips_input_range,
+# sampling_align, ws_loss, and the default fused depth weight).
+# ---------------------------------------------------------------------------
+ENTRIES["mp3d_double_256_screen"] = dict(
+    configs=[
+        "configs/OmniScene/screen/stage3_screen.py",
+        "configs/OmniScene/screen/long_c0.py",
+        "configs/OmniScene/screen/long_s.py",
+    ],
+    loader=ENTRIES["mp3d_double_256"]["loader"],
+    batch_size=ENTRIES["mp3d_double_256"]["batch_size"],
+    scheduler="onecycle_steps",
+    setup_order="loaders_before_model",
+    train_forward="plain",
+    num_processes=1,
+    validation=None,
+)
 
 # ---------------------------------------------------------------------------
 # Stage-4 rows (the fourth stage of the MP3D schedule: the stage-3 joint model

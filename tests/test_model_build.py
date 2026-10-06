@@ -1,5 +1,5 @@
-"""Every model config builds its model on CPU, as train.py and evaluate.py build it (default switches, from the
-repository root).
+"""Every model config builds its model on CPU, as train.py and evaluate.py build it (the config's own switches
+applied - none for the released configs - from the repository root).
 
 Some constructors allocate on 'cuda' directly (the renderer's background colour, triplane reference points) and
 torch.load() checkpoints saved on a GPU; here both stay on the CPU. A config whose pretrained weights are not on
@@ -39,7 +39,7 @@ class CudaOnCpu(TorchFunctionMode):
 
 
 def load_config(rel):
-    """The config as train.py / evaluate.py build it: switches applied (all defaults)."""
+    """The config as train.py / evaluate.py build it: its switches block applied (defaults for every other switch)."""
     config = pytest.importorskip("mmengine.config")
     from tools import switches
 

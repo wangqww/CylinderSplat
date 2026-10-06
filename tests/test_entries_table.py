@@ -18,6 +18,7 @@ import types
 import pytest
 
 from tests.conftest import REPO_ROOT, kept_configs, load_by_path
+from tools.switches import SWITCHES as SWITCH_TABLE
 
 TABLE = load_by_path("configs/entries.py", "cylindersplat_entries_under_test")
 ENTRIES, STAGE4 = TABLE.ENTRIES, TABLE.STAGE4_ENTRIES
@@ -28,7 +29,11 @@ SETUP_ORDER = {
     "loaders_before_model": ["set_seed", "loaders", "init_trackers", "model", "scheduler", "prepare"],
     "model_before_loaders": ["init_trackers", "set_seed", "model", "scheduler", "loaders", "prepare"],
 }
-SCHEDULER_BUILDERS = {"onecycle": "build_onecycle_scheduler", "warmup_cosine": "build_warmup_cosine_scheduler"}
+SCHEDULER_BUILDERS = {
+    "onecycle": "build_onecycle_scheduler",
+    "onecycle_steps": "build_onecycle_steps_scheduler",
+    "warmup_cosine": "build_warmup_cosine_scheduler",
+}
 
 
 # ----------------------------------------------------------------------------- the table
@@ -40,6 +45,7 @@ def test_rows():
     }
     assert got == {
         "mp3d_double_256": (3, "module", "module", "onecycle"),
+        "mp3d_double_256_screen": (1, "plain", None, "onecycle_steps"),
         "mp3d_single_256": (3, "module", "module", "onecycle"),
         "loc360_all_256": (3, "module", None, "onecycle"),
         "mp3d_double_512": (1, "plain", "plain", "warmup_cosine"),
@@ -53,14 +59,41 @@ def test_every_config_is_trained_by_a_row():
     assert sorted({cfg for e in ALL_ENTRIES.values() for cfg in e["configs"]}) == kept_configs()
 
 
+@pytest.mark.parametrize("kind", ["onecycle", "onecycle_steps"])
+def test_scheduler_table_matches_the_live_builder(kind):
+    """SCHEDULERS documents what train.py builds; both must give the same learning-rate trajectory."""
+    torch = pytest.importorskip("torch")
+    train = train_module()
+    cfg = types.SimpleNamespace(lr=2e-4, onecycle_total_steps=310)
+    loader, epochs = list(range(12)), 25
+
+    def optimizer():
+        return torch.optim.SGD([torch.zeros(1, requires_grad=True)], lr=cfg.lr)
+
+    (spec,) = TABLE.SCHEDULERS[kind]
+    env = dict(cfg=cfg, train_dataloader=loader, max_num_epochs=epochs)
+    kwargs = {k: eval(v, {"torch": torch}, env) for k, v in spec["kwargs"].items()}
+    from_table = torch.optim.lr_scheduler.OneCycleLR(optimizer(), **kwargs)
+    if kind == "onecycle":
+        live = train.build_onecycle_scheduler(optimizer(), cfg, loader, epochs)
+    else:
+        live = train.build_onecycle_steps_scheduler(optimizer(), cfg)
+    assert from_table.total_steps == live.total_steps
+    for _ in range(from_table.total_steps - 1):
+        assert from_table.get_last_lr() == pytest.approx(live.get_last_lr(), rel=0, abs=0)
+        from_table.optimizer.step(), live.optimizer.step()
+        from_table.step(), live.step()
+
+
 @pytest.mark.parametrize("row", ROWS)
 def test_row_is_consistent(row):
     e = ALL_ENTRIES[row]
     loader = e["loader"]
     assert os.path.isfile(os.path.join(REPO_ROOT, loader["module"].replace(".", "/") + ".py"))
     assert e["scheduler"] in TABLE.SCHEDULERS and e["setup_order"] in SETUP_ORDER
-    # OneCycle needs len(train_dataloader), so its rows build the loaders first.
-    assert (e["scheduler"] == "onecycle") == (e["setup_order"] == "loaders_before_model")
+    # OneCycle needs len(train_dataloader), so its rows build the loaders first; the fixed-step OneCycle of the screen
+    # row does not, but keeps the loaders-first order of mp3d_double_256, whose loaders it uses.
+    assert (e["scheduler"] in ("onecycle", "onecycle_steps")) == (e["setup_order"] == "loaders_before_model")
     # .module exists only on the DDP wrapper, i.e. with more than one process.
     assert (e["train_forward"] == "module") == (e["num_processes"] > 1)
     assert e["validation"] in (None, e["train_forward"])
@@ -155,6 +188,7 @@ save_freq = 2
 val_freq = 2
 max_epochs = 2
 max_train_steps = 100
+onecycle_total_steps = 50
 warmup_steps = 10
 mixed_precision = "no"
 gradient_accumulation_steps = 1
@@ -369,6 +403,9 @@ def test_fake_run(row, monkeypatch, tmp_path):
     if e["scheduler"] == "onecycle":
         assert type(scheduler).__name__ == "OneCycleLR"
         assert scheduler.total_steps == len(loaders["train"][3]) * 2 + 100  # max_epochs = 2
+    elif e["scheduler"] == "onecycle_steps":
+        assert type(scheduler).__name__ == "OneCycleLR"
+        assert scheduler.total_steps == 50  # onecycle_total_steps of the fake config
     else:
         assert type(scheduler).__name__ == "SequentialLR"
         assert scheduler._milestones == [10 * e["num_processes"]]  # warmup_steps x processes
@@ -392,7 +429,7 @@ def test_fake_run(row, monkeypatch, tmp_path):
     saves = [ev[1] for ev in events if ev[0] == "save_state"]
     assert saves == [os.path.join(work, f"checkpoint-{s}") for s in SAVED_STEPS]
     assert os.path.realpath(os.path.join(work, "latest")) == os.path.realpath(saves[-1])
-    assert read_switches(work) == dict(ddp_forward=False, loc360_interleave=False, depth_valid_mask=False)
+    assert read_switches(work) == {name: spec[0] for name, spec in SWITCH_TABLE.items()}
     assert os.path.isfile(os.path.join(work, "fake_cfg.py"))
     assert names(events)[-1] == "end_training"
 

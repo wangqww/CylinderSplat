@@ -1,8 +1,9 @@
 """Configs that build on another config differ from it only in the values their headers document (mmengine).
 
-The release/ recipes, the stage-4 512x1024 config and the single-view joint config.
+The release/ recipes, the stage-4 512x1024 config, the single-view joint config and the long fine-tune configs.
 """
 
+import glob
 import os
 
 import pytest
@@ -102,3 +103,38 @@ def test_single_view_config_is_all_256_with_one_frame():
     cfg, base = load("omni_gs_160x320_mp3d_cylinder_all_256_single.py"), load(ALL_256)
     assert cfg.model.pixel_gs.num_frames == 1 and "num_frames" not in base.model.pixel_gs
     assert diff(cfg, base) == {"exp_name", "resume_from", "model.pixel_gs.num_frames"}
+
+
+LONG_CONFIGS = sorted(os.path.basename(p) for p in glob.glob(os.path.join(REPO_ROOT, OMNI, "screen", "long_*.py")))
+
+
+# non-default switches and the depth weight of every long config (long_s = the LS recipe)
+LONG_SWITCHES = {
+    "long_c0.py": ({"prune_invisible"}, 1.0),
+    "long_s.py": ({"prune_invisible", "lpips_input_range", "sampling_align", "ws_loss"}, 0.1),
+}
+
+
+@pytest.mark.parametrize("name", LONG_CONFIGS)
+def test_long_configs_carry_exactly_their_switch_set(name):
+    from tools import switches
+
+    cfg = load(f"screen/{name}")
+    expected_switches, depth_weight = LONG_SWITCHES[name]
+    assert set(switches.non_default(switches.resolve(cfg))) == expected_switches
+    assert cfg.model.loss_args.weight_depth_abs == depth_weight
+
+
+@pytest.mark.parametrize("name", LONG_CONFIGS)
+def test_long_configs_are_the_screen_base_on_the_long_schedule(name):
+    """The long fine-tunes: stage3_screen with lr 5e-5 over a 20,100-step OneCycle, saves every 5,000 steps,
+    prune_invisible on; beyond that only switches and the fused depth weight may differ."""
+    cfg, base = load(f"screen/{name}"), load("screen/stage3_screen.py")
+    assert (cfg.lr, cfg.onecycle_total_steps, cfg.save_freq, cfg.seed) == (5e-5, 20100, 5000, 1111)
+    assert cfg.switches["prune_invisible"] is True
+    allowed = {"lr", "onecycle_total_steps", "save_freq", "model.loss_args.weight_depth_abs"}
+    assert {k for k in diff(cfg, base) if not k.startswith("switches.")} <= allowed
+
+
+def test_every_long_config_is_listed():
+    assert sorted(LONG_SWITCHES) == LONG_CONFIGS

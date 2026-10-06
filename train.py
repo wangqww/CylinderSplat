@@ -178,9 +178,26 @@ def build_warmup_cosine_scheduler(optimizer, cfg, accelerator):
     return scheduler
 
 
+def build_onecycle_steps_scheduler(optimizer, cfg):
+    # The same OneCycle over a fixed number of steps (cfg.onecycle_total_steps): the fine-tunes of row
+    # mp3d_double_256_screen, which stop at --max-steps instead of after max_epochs passes over the loader.
+    return torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=cfg.lr,
+        total_steps=cfg.onecycle_total_steps,
+        pct_start=0.01,
+        cycle_momentum=False,
+        anneal_strategy="cos",
+        div_factor=25.0,
+        final_div_factor=10000.0,
+    )
+
+
 def build_scheduler(entry, optimizer, cfg, accelerator, train_dataloader, max_num_epochs):
     if entry["scheduler"] == "onecycle":
         return build_onecycle_scheduler(optimizer, cfg, train_dataloader, max_num_epochs)
+    if entry["scheduler"] == "onecycle_steps":
+        return build_onecycle_steps_scheduler(optimizer, cfg)
     if entry["scheduler"] == "warmup_cosine":
         return build_warmup_cosine_scheduler(optimizer, cfg, accelerator)
     raise ValueError(f"unknown scheduler kind {entry['scheduler']!r}")
