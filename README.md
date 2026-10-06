@@ -220,7 +220,7 @@ scheduler, the forward call, validation and the number of processes (a launch wi
 | `loc360_all_256` | 360Loc, 256×512 | 3 | `omni_gs_160x320_360Loc_cylinder_all_256.py`, `release/loc360_finetune_256.py` |
 | `mp3d_double_512` | MP3D two-view, 512×1024, the `all_512` architecture | 1 | `omni_gs_160x320_mp3d_cylinder_{pixel,all}_512.py` |
 | `kansas_double_160` | Kansas City, 160×320 | 1 | `omni_gs_160x320_VIGOR_cylinder_*.py` |
-| `mp3d_double_256_screen` | MP3D two-view, 256×512; fine-tunes of a released or earlier checkpoint over a fixed step count | 1 | `screen/*.py` (`long_s.py` = the LS recipe below) |
+| `mp3d_double_256_screen` | MP3D two-view, 256×512; fine-tunes of a released or earlier checkpoint over a fixed step count | 1 | `screen/*.py` (`long_s.py` = the LS recipe, `s3k_*.py` = the volume sparsity fine-tunes below) |
 
 Launch with the matching config in [`configs/accelerate/`](configs/accelerate) (`accel_3proc.yaml` or
 `accel_1proc.yaml`; pass `--gpu_ids` and, for 4 processes, `--num_processes 4`). Options:
@@ -244,6 +244,7 @@ Launch with the matching config in [`configs/accelerate/`](configs/accelerate) (
 | `sampling_align` | pixel-centre sampling (`align_corners=False`) with longitude wrap, in the pixel branch's cost-volume warp and the volume branch's colour / depth retrieval; changes the model, so a checkpoint trained with it is evaluated with it |
 | `ws_loss` | latitude (WS-PSNR) weights on the fused L2 and perceptual losses |
 | `prune_invisible` | Gaussians with opacity below 1/255 are dropped before rasterising (the rasteriser never blends them; renders unchanged) |
+| `volume_sparsity` | joint model, one process only: a one-sided budget on the share of rendered volume Gaussians, carried by their opacity logits (a training loss; `model.sparsity_args`, whose `budget_start` must be set; see "Volume sparsity") |
 
 A config's `switches` also apply in `evaluate.py`: evaluate a checkpoint with the config it was trained with.
 
@@ -298,11 +299,46 @@ Novel views (`--novel-only`), one run (seed 1111), WS-PSNR / LPIPS; `long_c0` is
 |---|---|---|---|---|---|---|
 | released stage 3 | 25.04 / 0.124 | 19.39 / 0.343 | 22.51 / 0.215 | 26.82 / 0.103 | 29.03 / 0.074 | 26.88 / 0.180 |
 | `long_c0` (20k steps) | 24.94 / 0.127 | 19.63 / 0.338 | 22.61 / 0.209 | 26.79 / 0.107 | 28.90 / 0.082 | 26.92 / 0.182 |
-| `long_s` (LS, 20k steps) | 25.25 / 0.118 | 19.71 / 0.323 | 22.77 / 0.191 | 27.01 / 0.101 | 29.43 / 0.069 | 26.89 / 0.183 |
+| `long_s` (LS, 20k steps) | 25.25 / 0.118 | 19.71 / 0.322 | 22.77 / 0.191 | 27.01 / 0.101 | 29.43 / 0.069 | 26.89 / 0.183 |
 
 The test sets have 10 samples per MP3D baseline, so the 2.0 m column is noisy (in our runs it moved by up to 0.6 dB
 between nearby checkpoints of one recipe): read it together with the validation column.
 The LS checkpoint is not part of the release.
+
+### Volume sparsity (optional, from LS)
+
+The volume branch predicts 786,432 Gaussians per sample, many of them behind surfaces where no camera sees them. The
+`volume_sparsity` switch (joint model only) adds a one-sided training loss on the share of rendered volume Gaussians
+(opacity ≥ 1/255) among the volume slots: while the share is above a target that ramps down to 0.35, it pushes the
+opacity logits of the rendered volume Gaussians down; a Gaussian below 1/255 is not rendered and gets no gradient from
+the renders or the budget, so the share stays down while the budget holds it there. The forward pass is unchanged.
+`model.sparsity_args.budget_start` (the target at step 0) has no default: set it to the init's largest training-batch
+volume share + 0.03, rounded up to a multiple of 0.05 (0.85 for LS, whose largest is 0.808); `train.py` refuses a run
+without it, and a run on more than one process. `train.py` stops a run with a non-finite loss and, from step 3,600
+(`collapse_from`), one whose trailing 100-step share falls below half its target (`collapse_floor` 0.5;
+`scripts/long_arm.sh` exits 7).
+[`screen/s3k_ls_sp3.py`](configs/OmniScene/screen/s3k_ls_sp3.py) fine-tunes LS for 8,000 steps with the budget;
+[`screen/s3k_ls.py`](configs/OmniScene/screen/s3k_ls.py) is the same run without it:
+
+```bash
+CYLINDERSPLAT_INIT=$RUNS/long_s/checkpoint-20000 CYLINDERSPLAT_STEPS=8000 CYLINDERSPLAT_EVAL_STEPS=8000 \
+CYLINDERSPLAT_RUNS_ROOT=$RUNS CYLINDERSPLAT_RELEASED_VAL=<the released val --novel-only metrics.json> \
+    bash scripts/long_arm.sh s3k_ls_sp3 0      # and s3k_ls for the control
+```
+
+Mean rendered Gaussians per val sample (all / volume) and novel-view WS-PSNR / LPIPS, one run (seed 1111):
+
+| model | Gaussians | val 1.0 m | M3D 2.0 m | M3D 1.5 m | M3D 1.0 m | Replica | Residential |
+|---|---|---|---|---|---|---|---|
+| `long_s` (LS) | 758k / 555k | 25.25 / 0.118 | 19.71 / 0.322 | 22.77 / 0.191 | 27.01 / 0.101 | 29.43 / 0.069 | 26.89 / 0.183 |
+| `s3k_ls` (LS + 8k) | 759k / 554k | 25.30 / 0.116 | 19.11 / 0.340 | 22.63 / 0.199 | 27.11 / 0.096 | 29.76 / 0.063 | 26.97 / 0.186 |
+| `s3k_ls_sp3` (LS + 8k, budget) | 463k / 258k | 25.36 / 0.116 | 19.02 / 0.331 | 22.62 / 0.192 | 27.16 / 0.095 | 29.70 / 0.065 | 26.99 / 0.185 |
+
+The budget halves the rendered volume Gaussians (−39% in total) at the quality of its control (val +0.06 dB; 2.0 m
+−0.09 dB on the novel view, −0.02 dB on all three frames); it removes mostly Gaussians hidden behind surfaces. Both
+8,000-step fine-tunes lose 0.6–0.7 dB at 2.0 m against LS itself, so LS remains the recommended model and the budget
+is the option when fewer Gaussians matter more than the widest baseline. The 2.0 m difference to the control is within
+one paired standard error of its 10 test samples.
 
 ### 360Loc fine-tune
 
