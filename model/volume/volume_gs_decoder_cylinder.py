@@ -32,8 +32,13 @@ class VolumeGaussianDecoderCylinder(BaseModule):
         offset_max=None,
         scale_max=None,
         use_checkpoint=False,
+        sampling_align=False,
     ):
+        """sampling_align: the RGB / depth retrieval samples with pixel-centre coordinates matching
+        align_corners=False (u / w instead of u / (w - 1)) from images padded in longitude (wrap); off = the
+        released normalize()."""
         super().__init__()
+        self.sampling_align = sampling_align
         self.tpv_theta = tpv_theta
         self.tpv_r = tpv_r
         self.tpv_z = tpv_z
@@ -79,6 +84,19 @@ class VolumeGaussianDecoderCylinder(BaseModule):
             pc_range[5],
         )
         self.register_buffer("scale_cylinder", scale_cylinder)
+
+    def sample_source(self, source, pixel_locations, h, w, pad):
+        """grid_sample of source [N, C, h, w] at continuous ERP pixel coordinates [N, 1, P, 2] (u in [0, w],
+        v in [0, h]). With sampling_align the source gets `pad` wrapped columns on each side and the
+        coordinates are mapped for align_corners=False; otherwise the released normalize()."""
+        if self.sampling_align:
+            source = torch.cat([source[..., -pad:], source, source[..., :pad]], dim=-1)
+            scale = pixel_locations.new_tensor([w + 2.0 * pad, float(h)])
+            offset = pixel_locations.new_tensor([float(pad), 0.0])
+            grid = 2 * (pixel_locations + offset) / scale - 1.0
+        else:
+            grid = self.normalize(pixel_locations, h, w)
+        return F.grid_sample(source, grid, align_corners=False)
 
     def normalize(self, pixel_locations, h, w):
         resize_factor = torch.tensor([w - 1.0, h - 1.0]).to(pixel_locations.device)[None, None, None, :]
@@ -257,10 +275,8 @@ class VolumeGaussianDecoderCylinder(BaseModule):
             & (project_depth > 0.0)
         )  # [bs, view, num_points]
 
-        depths_sampled = F.grid_sample(
-            source_depths.reshape(b * v, 1, h, w),
-            self.normalize(pixel_locations.view(b * v, 1, -1, 2), h, w),
-            align_corners=False,
+        depths_sampled = self.sample_source(
+            source_depths.reshape(b * v, 1, h, w), pixel_locations.view(b * v, 1, -1, 2), h, w, local_radius + 1
         )
 
         depths_sampled = depths_sampled.squeeze().view(b, v, -1)  # [bs, view, num_points]
@@ -278,18 +294,14 @@ class VolumeGaussianDecoderCylinder(BaseModule):
             dim=2
         )  # [bs, view, num_points, local_h*local_w, 2]
         pixel_locations = pixel_locations.view(b, v, -1, 2)  # [bs, view, num_points*local_h*local_w, 2]
-        normalized_pixel_locations = self.normalize(pixel_locations, h, w)  # [bs, view, num_points*local_h*local_w, 2]
-        normalized_pixel_locations = normalized_pixel_locations.unsqueeze(
-            2
-        )  # [bs, view, 1, num_points*local_h*local_w, 2]
         mask_in_front = (
             mask_in_front.unsqueeze(dim=3).repeat(1, 1, 1, local_h * local_w).contiguous()
         )  # [bs, view, num_points, local_h*local_w]
         mask_in_front = mask_in_front.view(b, v, -1)  # [bs, view, num_points*local_h*local_w]
 
-        rgbs_sampled = F.grid_sample(
-            source_imgs.reshape(b * v, 3, h, w), normalized_pixel_locations.view(b * v, 1, -1, 2), align_corners=False
-        )  # [bs*v, 3, num_points*local_h*local_w]
+        rgbs_sampled = self.sample_source(
+            source_imgs.reshape(b * v, 3, h, w), pixel_locations.view(b * v, 1, -1, 2), h, w, local_radius + 1
+        )  # [bs*v, 3, 1, num_points*local_h*local_w]
 
         rgb_sampled = rgbs_sampled.view(b, v, 3, -1)  # [bs, view, 3, num_points*local_h*local_w]
         rgb_sampled = rgb_sampled.permute(0, 1, 3, 2)  # [bs, view, num_points*local_h*local_w, 3]

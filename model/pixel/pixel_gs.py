@@ -51,12 +51,17 @@ def warp_with_pose_depth_candidates(
     depth,
     clamp_min_depth=1e-3,
     warp_padding_mode="zeros",
+    sampling_align=False,
 ):
     """
     feature1: [B, C, H, W]
     intrinsics: [B, 3, 3]
     pose: [B, 4, 4]
     depth: [B, D, H, W]
+    sampling_align: sample with align_corners=False, which matches the pixel-centre coordinates u, v in [0, 1]
+        of points_grid, from a feature map padded by one column of the opposite side on each end (longitude
+        wraps). Off: the released x = 2u - 1 with align_corners=True (half a feature pixel off at the borders)
+        and zero padding.
     """
 
     assert pose.size(1) == pose.size(2) == 4
@@ -82,18 +87,24 @@ def warp_with_pose_depth_candidates(
         v = (theta + np.pi / 2) / np.pi
 
         # normalize to [-1, 1]
-        x_grid = 2 * u - 1
+        if sampling_align:
+            # pixel coordinate u * w in the map padded by one column on each side, align_corners=False
+            x_grid = 2 * (u * w + 1) / (w + 2) - 1
+        else:
+            x_grid = 2 * u - 1
         y_grid = 2 * v - 1
 
         grid = torch.stack([x_grid, y_grid], dim=-1)  # [B, D, H*W, 2]
 
+    if sampling_align:
+        feature1 = torch.cat([feature1[..., -1:], feature1, feature1[..., :1]], dim=-1)
     # sample features
     warped_feature = F.grid_sample(
         feature1,
         grid.view(b, d * h, w, 2),
         mode="bilinear",
         padding_mode=warp_padding_mode,
-        align_corners=True,
+        align_corners=not sampling_align,
     ).view(b, c, d, h, w)  # [B, C, D, H, W]
 
     return warped_feature
@@ -109,11 +120,15 @@ class PixelGaussian(BaseModule):
         gh_cnn_layers=3,
         gaussians_per_pixel=3,
         num_frames=2,
+        sampling_align=False,
         **kwargs,
     ):
+        """sampling_align: pixel-centre sampling with longitude wrap in the cost-volume warp (see
+        warp_with_pose_depth_candidates); off = the released align_corners=True warp."""
 
         super().__init__()
 
+        self.sampling_align = sampling_align
         self.gaussians_per_pixel = gaussians_per_pixel
         feature_channels_list = [128, 96, 64, 32]
         self.costvolume_unet_feat_dims_list = [128, 64, 32]
@@ -342,6 +357,7 @@ class PixelGaussian(BaseModule):
                     pose_curr,
                     disp_candi_curr,
                     warp_padding_mode="zeros",
+                    sampling_align=self.sampling_align,
                 )  # [vB, C, D, H, W]
                 # calculate similarity
                 raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(1) / (c**0.5)  # [vB, D, H, W]

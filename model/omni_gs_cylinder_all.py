@@ -29,12 +29,22 @@ class OmniGaussianCylinderAll(BaseModule):
         dataset_params=None,
         use_checkpoint=False,
         point_cloud_range=None,
+        lpips_input_range=False,
+        ws_loss=False,
         **kwargs,
     ):
+        """
+        lpips_input_range: feed the training perceptual loss [-1, 1] images (2x - 1), the range taming's LPIPS
+            expects; the released runs fed [0, 1].
+        ws_loss: latitude weights (the WS-PSNR weights, sin of the polar angle per row) on the fused L2 and on
+            both perceptual terms; loss_recon is still logged as the unweighted mean.
+        """
 
         super().__init__()
 
         self.use_checkpoint = use_checkpoint
+        self.lpips_input_range = lpips_input_range
+        self.ws_loss = ws_loss
 
         self.backbone = MODELS.build(backbone)
         self.pixel_gs = MODELS.build(pixel_gs)
@@ -170,6 +180,23 @@ class OmniGaussianCylinderAll(BaseModule):
             eps=1e-8,
         )
         return [opt]
+
+    @staticmethod
+    def _row_weights(height, like):
+        """WS-PSNR row weights sin((row + 0.5) * pi / H) as an [H, 1] tensor (tools/metrics.py WSPSNR.get_weights)."""
+        rows = torch.arange(height, device=like.device, dtype=like.dtype)
+        return torch.sin((rows + 0.5) * (np.pi / height))[:, None]
+
+    def _ws_mean(self, err):
+        """sum(w * err) / sum(w) over every element of err [..., H, W]."""
+        w = self._row_weights(err.shape[-2], err).expand_as(err)
+        return (w * err).sum() / w.sum()
+
+    def _perceptual(self, pred, gt):
+        """Training LPIPS of [0, 1] images, with the lpips_input_range / ws_loss switches applied."""
+        if self.lpips_input_range:
+            pred, gt = 2 * pred - 1, 2 * gt - 1
+        return self.perceptual_loss(pred, gt, row_weighted=self.ws_loss)
 
     def forward(self, batch, split="train", iter=0, iter_end=100000):
         """Forward training function."""
@@ -315,8 +342,16 @@ class OmniGaussianCylinderAll(BaseModule):
                 rec_loss = torch.abs(rgb_gt - render_pkg_fuse["image"])
             elif self.loss_args.recon_loss_type == "l2":
                 rec_loss = (rgb_gt - render_pkg_fuse["image"]) ** 2
-            loss = loss + (rec_loss.mean() * self.loss_args.weight_recon)
-            set_loss("recon", split, rec_loss.mean(), self.loss_args.weight_recon)
+            if self.ws_loss:
+                # optimise the latitude-weighted mean; loss_recon stays logged as the unweighted mean (comparable with
+                # runs without ws_loss)
+                rec_loss_ws = self._ws_mean(rec_loss)
+                loss = loss + (rec_loss_ws * self.loss_args.weight_recon)
+                set_loss("recon_ws", split, rec_loss_ws, self.loss_args.weight_recon)
+                set_loss("recon", split, rec_loss.mean().detach(), 0.0)
+            else:
+                loss = loss + (rec_loss.mean() * self.loss_args.weight_recon)
+                set_loss("recon", split, rec_loss.mean(), self.loss_args.weight_recon)
 
         if self.loss_args.weight_recon_vol > 0:
             # RGB loss for volume-gs
@@ -345,7 +380,7 @@ class OmniGaussianCylinderAll(BaseModule):
                 rgb_gt.reshape(-1, 3, self.camera_args.resolution[0], self.camera_args.resolution[1]),
                 tgt_reso=self.loss_args.perceptual_resolution,
             )
-            p_loss = self.perceptual_loss(p_inp_pred, p_inp_gt)
+            p_loss = self._perceptual(p_inp_pred, p_inp_gt)
             p_loss = rearrange(p_loss, "(b v) c h w -> b v c h w", b=bs)
             p_loss = p_loss.mean()
             loss = loss + (p_loss * self.loss_args.weight_perceptual)
@@ -367,7 +402,7 @@ class OmniGaussianCylinderAll(BaseModule):
                 mask_dptm.reshape(-1, 1, self.camera_args.resolution[0], self.camera_args.resolution[1]),
                 tgt_reso=self.loss_args.perceptual_resolution,
             )
-            p_loss_vol = self.perceptual_loss(p_inp_pred_vol * p_inp_mask_vol, p_inp_gt * p_inp_mask_vol)
+            p_loss_vol = self._perceptual(p_inp_pred_vol * p_inp_mask_vol, p_inp_gt * p_inp_mask_vol)
             p_loss_vol = rearrange(p_loss_vol, "(b v) c h w -> b v c h w", b=bs)
             p_loss_vol = p_loss_vol.mean()
             loss = loss + (p_loss_vol * self.loss_args.weight_perceptual_vol)

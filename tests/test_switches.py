@@ -1,4 +1,4 @@
-"""tools/switches.py: the three switches, value parsing, config / CLI resolution, where a model switch is
+"""tools/switches.py: the switch table, value parsing, config / CLI resolution, where a model switch is
 written, and the refusal of unknown switches and of a switch the target class does not declare.
 
 The unit tests use a small stand-in for mmengine's Config and a stubbed registry lookup (no torch). The last
@@ -17,7 +17,13 @@ TABLE = {
     "ddp_forward": (False, []),
     "loc360_interleave": (False, []),
     "depth_valid_mask": (False, ["model.depth_valid_mask"]),
+    "lpips_input_range": (False, ["model.lpips_input_range"]),
+    "sampling_align": (False, ["model.pixel_gs.sampling_align", "model.volume_gs.gs_decoder.sampling_align"]),
+    "ws_loss": (False, ["model.ws_loss"]),
+    "prune_invisible": (False, ["model.camera_args.prune_invisible"]),
 }
+# The nested model nodes the switch paths above write into.
+SUBMODULES = dict(pixel_gs={}, volume_gs=dict(gs_decoder={}), camera_args={})
 DEFAULTS = {name: default for name, (default, _) in TABLE.items()}
 
 
@@ -107,7 +113,7 @@ def test_resolve():
     before = plain(cfg)
     # The command line wins over the config; resolve() writes nothing.
     values = switches.resolve(cfg, ["depth_valid_mask=false", "ddp_forward=1"])
-    assert values == dict(ddp_forward=True, loc360_interleave=True, depth_valid_mask=False)
+    assert values == dict(DEFAULTS, ddp_forward=True, loc360_interleave=True, depth_valid_mask=False)
     assert plain(cfg) == before
     assert switches.non_default(values) == dict(ddp_forward=True, loc360_interleave=True)
     assert switches.non_default(DEFAULTS) == {}
@@ -133,13 +139,17 @@ def test_defaults_write_nothing(registry):
 
 @pytest.mark.parametrize("name", sorted(TABLE))
 def test_a_switch_is_written_to_its_paths_only(name, registry):
-    cfg = fake_cfg()
+    cfg = fake_cfg(**plain(SUBMODULES))
     values = switches.apply(cfg, [f"{name}=true"])
     assert switches.non_default(values) == {name: True} and cfg["switches"] == values
-    expected = dict(type="FakeModel")
+    expected = dict(type="FakeModel", **plain(SUBMODULES))
     for path in TABLE[name][1]:
-        expected[path[len("model.") :]] = True
-    assert cfg["model"] == expected
+        *parents, leaf = path.split(".")[1:]
+        node = expected
+        for key in parents:
+            node = node[key]
+        node[leaf] = True
+    assert plain(cfg["model"]) == expected
 
 
 def test_a_default_overrides_the_value_of_a_dumped_config(registry):
@@ -184,6 +194,21 @@ def test_an_unregistered_or_untyped_model_is_left_to_the_builder(registry):
     assert cfg["model"]["depth_valid_mask"] is True and registry[1] == ["FakeModel"]
 
 
+def test_renderer_switches_are_declared_by_the_renderer():
+    # model.camera_args has no registry type, so apply() cannot check these; GaussianRenderer takes **kwargs and
+    # would swallow a misspelt one.
+    pytest.importorskip("torch")
+    pytest.importorskip("pano_gaussian")
+    import inspect
+
+    from model.gaussian import GaussianRenderer
+
+    declared = inspect.signature(GaussianRenderer.__init__).parameters
+    renderer_switches = [n for n, (_, paths) in TABLE.items() if any(p.startswith("model.camera_args.") for p in paths)]
+    assert renderer_switches == ["prune_invisible"]
+    assert all(name in declared for name in renderer_switches)
+
+
 # ----------------------------------------------------------------------------- real configs, real registry
 
 
@@ -193,8 +218,10 @@ def test_depth_valid_mask_is_accepted_only_by_the_360loc_model(rel):
     import_models()
     cfg = config.Config.fromfile(os.path.join(REPO_ROOT, rel))
     before = plain(cfg.model)
-    assert switches.apply(cfg, []) == DEFAULTS
-    assert plain(cfg.model) == before
+    block = dict(cfg.get("switches", None) or {})  # the long configs set their switches in the config
+    assert switches.apply(cfg, []) == dict(DEFAULTS, **{k: switches._parse_value(k, v) for k, v in block.items()})
+    if not block:
+        assert plain(cfg.model) == before
     model_type = cfg.model.type
     if model_type == "OmniGaussianCylinderVolume360LocPan2":
         switches.apply(cfg, ["depth_valid_mask=true"])

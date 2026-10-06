@@ -82,7 +82,9 @@ class LPIPS(nn.Module):
         model.load_state_dict(torch.load(ckpt, map_location=torch.device("cpu")), strict=False)
         return model
 
-    def forward(self, input, target):
+    def forward(self, input, target, row_weighted=False):
+        """row_weighted: replace each layer's spatial mean by a mean weighted per row with the WS-PSNR weights
+        sin((row + 0.5) * pi / H_layer) (equirectangular inputs)."""
         in0_input, in1_input = (self.scaling_layer(input), self.scaling_layer(target))
         outs0, outs1 = self.net(in0_input), self.net(in1_input)
         feats0, feats1, diffs = {}, {}, {}
@@ -91,7 +93,8 @@ class LPIPS(nn.Module):
             feats0[kk], feats1[kk] = normalize_tensor(outs0[kk]), normalize_tensor(outs1[kk])
             diffs[kk] = (feats0[kk] - feats1[kk]) ** 2
 
-        res = [spatial_average(lins[kk].model(diffs[kk]), keepdim=True) for kk in range(len(self.chns))]
+        average = row_weighted_average if row_weighted else spatial_average
+        res = [average(lins[kk].model(diffs[kk]), keepdim=True) for kk in range(len(self.chns))]
         val = res[0]
         for l in range(1, len(self.chns)):
             val += res[l]
@@ -173,6 +176,14 @@ def normalize_tensor(x, eps=1e-10):
 
 def spatial_average(x, keepdim=True):
     return x.mean([2, 3], keepdim=keepdim)
+
+
+def row_weighted_average(x, keepdim=True):
+    """Mean over H and W with the equirectangular row weights sin((row + 0.5) * pi / H), normalised."""
+    height = x.shape[2]
+    rows = torch.arange(height, device=x.device, dtype=x.dtype)
+    w = torch.sin((rows + 0.5) * (math.pi / height)).view(1, 1, height, 1)
+    return (x * w).mean([2, 3], keepdim=keepdim) / w.mean()
 
 
 import torch

@@ -31,6 +31,19 @@ SWITCHES = {
     "loc360_interleave": (False, bool, [], "data: interleave the 360Loc training sequences"),
     # 360Loc: the depth loss ignores prior depth outside the loader's (near, far) range.
     "depth_valid_mask": (False, bool, ["model.depth_valid_mask"], "train: mask invalid prior depth in the depth loss"),
+    # Training LPIPS on [-1, 1] inputs (taming's ScalingLayer expects them; the released runs fed [0, 1]).
+    "lpips_input_range": (
+        False, bool, ["model.lpips_input_range"], "train: perceptual loss on 2x-1 inputs"),
+    # Sampling that matches align_corners=False and wraps in longitude: the volume RGB / depth retrieval
+    # (2u/w - 1 instead of 2u/(w-1) - 1) and the pixel branch's cost-volume warp (align_corners=True before).
+    "sampling_align": (
+        False, bool, ["model.pixel_gs.sampling_align", "model.volume_gs.gs_decoder.sampling_align"],
+        "model: pixel-centre sampling with longitude wrap in the warp and the retrieval"),
+    # Latitude (WS-PSNR) weights on the fused L2 and the perceptual terms.
+    "ws_loss": (False, bool, ["model.ws_loss"], "train: latitude-weighted L2 and perceptual loss"),
+    # Drop Gaussians with opacity < 1/255 before rasterising (the rasteriser never blends them; renders unchanged).
+    "prune_invisible": (
+        False, bool, ["model.camera_args.prune_invisible"], "model: skip Gaussians the rasteriser never blends"),
 }
 
 _TRUE = ("1", "true", "yes", "on")

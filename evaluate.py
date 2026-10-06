@@ -43,7 +43,15 @@ REPO_ROOT = osp.dirname(osp.abspath(__file__))
 # --run-id NAME writes to <runs root>/NAME (the same root as train.py).
 RUNS_ROOT = os.environ.get("CYLINDERSPLAT_RUNS_ROOT", osp.join(REPO_ROOT, "workdirs"))
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-TRAIN_ONLY_SWITCHES = ("ddp_forward", "loc360_interleave", "depth_valid_mask")
+# Switches that only change the training loss or the run; sampling_align and prune_invisible change the forward and
+# stay active here (a run is evaluated with the config it was trained with).
+TRAIN_ONLY_SWITCHES = (
+    "ddp_forward",
+    "loc360_interleave",
+    "depth_valid_mask",
+    "lpips_input_range",
+    "ws_loss",
+)
 
 
 def load_eval_entries():
@@ -962,8 +970,9 @@ def parse_args(argv=None):
         action="append",
         default=[],
         metavar="NAME=VALUE",
-        help="behaviour switch (tools/switches.py), repeatable; overrides the config "
-        "(the current switches only affect training)",
+        help="behaviour switch (tools/switches.py), repeatable; overrides the config. sampling_align and "
+        "prune_invisible change the forward: evaluate a run with the config it was trained with; the other switches "
+        "only affect training",
     )
     parser.add_argument(
         "--strict-load",

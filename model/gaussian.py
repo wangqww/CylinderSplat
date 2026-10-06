@@ -137,8 +137,14 @@ class GaussianRenderer:
         resolution: list = [512, 512],
         znear: float = 0.1,
         zfar: float = 100.0,
+        prune_invisible: bool = False,
         **kwargs,
     ):
+        """
+        prune_invisible: drop the Gaussians whose opacity is below 1/255 before rasterising. The rasteriser skips every
+            pixel contribution with alpha = min(0.99, opacity * exp(power)) < 1/255 (power <= 0), forward and
+            backward, so such a Gaussian never blends and never gets a gradient: renders are unchanged.
+        """
         self.renderer_type = renderer_type
         if renderer_type == "panorama":
             self.resolution = resolution
@@ -146,6 +152,7 @@ class GaussianRenderer:
             self.resolution = [int(resolution[0] / 2), int(resolution[1] / 4)]
         self.znear = znear
         self.zfar = zfar
+        self.prune_invisible = prune_invisible
         self.bg_color = torch.tensor([0, 0, 0], dtype=torch.float32, device="cuda")
 
         self.normal_module = Depth2Normal().to(device)
@@ -217,11 +224,16 @@ class GaussianRenderer:
         alphas = []
         depths = []
         for b in range(B):
-            means3D = gaussians[b, :, 0:3].contiguous().float()
-            rgbs = gaussians[b, :, 3:6].contiguous().float()  # [N, 3]
-            opacity = gaussians[b, :, 6:7].contiguous().float()
-            rotations = gaussians[b, :, 7:11].contiguous().float()
-            scales = gaussians[b, :, 11:].contiguous().float()
+            gaussians_b = gaussians[b]
+            if self.prune_invisible:
+                # the kernel's threshold 1.0f / 255.0f, compared in float32
+                visible = gaussians_b[:, 6].float() >= torch.tensor(1.0 / 255.0, dtype=torch.float32)
+                gaussians_b = gaussians_b[visible]
+            means3D = gaussians_b[:, 0:3].contiguous().float()
+            rgbs = gaussians_b[:, 3:6].contiguous().float()  # [N, 3]
+            opacity = gaussians_b[:, 6:7].contiguous().float()
+            rotations = gaussians_b[:, 7:11].contiguous().float()
+            scales = gaussians_b[:, 11:].contiguous().float()
             means2D = torch.zeros_like(means3D, dtype=means3D.dtype, device=device)
 
             for v in range(V):
