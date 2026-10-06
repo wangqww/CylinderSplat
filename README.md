@@ -220,6 +220,7 @@ scheduler, the forward call, validation and the number of processes (a launch wi
 | `loc360_all_256` | 360Loc, 256×512 | 3 | `omni_gs_160x320_360Loc_cylinder_all_256.py`, `release/loc360_finetune_256.py` |
 | `mp3d_double_512` | MP3D two-view, 512×1024, the `all_512` architecture | 1 | `omni_gs_160x320_mp3d_cylinder_{pixel,all}_512.py` |
 | `kansas_double_160` | Kansas City, 160×320 | 1 | `omni_gs_160x320_VIGOR_cylinder_*.py` |
+| `mp3d_double_256_screen` | MP3D two-view, 256×512; fine-tunes of a released or earlier checkpoint over a fixed step count | 1 | `screen/*.py` (`long_s.py` = the LS recipe below) |
 
 Launch with the matching config in [`configs/accelerate/`](configs/accelerate) (`accel_3proc.yaml` or
 `accel_1proc.yaml`; pass `--gpu_ids` and, for 4 processes, `--num_processes 4`). Options:
@@ -239,6 +240,12 @@ Launch with the matching config in [`configs/accelerate/`](configs/accelerate) (
 | `ddp_forward` | forward through the DDP wrapper, so gradients are synchronised across processes (adds `find_unused_parameters=True`); without it each process trains its own replica and only rank 0 is saved |
 | `loc360_interleave` | 360Loc: the training stream mixes all sequences instead of one sequence after another |
 | `depth_valid_mask` | 360Loc model: the depth loss skips prior depths outside (0.45, 50) m |
+| `lpips_input_range` | the training LPIPS sees images scaled to [-1, 1], the range its network expects (the released runs fed [0, 1]) |
+| `sampling_align` | pixel-centre sampling (`align_corners=False`) with longitude wrap, in the pixel branch's cost-volume warp and the volume branch's colour / depth retrieval; changes the model, so a checkpoint trained with it is evaluated with it |
+| `ws_loss` | latitude (WS-PSNR) weights on the fused L2 and perceptual losses |
+| `prune_invisible` | Gaussians with opacity below 1/255 are dropped before rasterising (the rasteriser never blends them; renders unchanged) |
+
+A config's `switches` also apply in `evaluate.py`: evaluate a checkpoint with the config it was trained with.
 
 ### MP3D two-view (stages 1–4)
 
@@ -269,6 +276,33 @@ Choose the checkpoint of each stage by evaluating every saved checkpoint on the 
 (`mp3d_double_256_val`; stage 4: `mp3d_double_512_full_val`) and continue from the best WS-PSNR; the step numbers
 above are those of the released runs. The learning rates (4e-4 for stages 1–2, 2e-4 for stages 3–4) were chosen by
 short probes on the validation split. On 3 × RTX 4090, stages 1, 2 and 3 take about 5, 7.5 and 20 hours.
+
+### LS fine-tune (MP3D, 256×512)
+
+The LS recipe continues the released stage-3 checkpoint for 20,000 steps on one GPU:
+[`screen/long_s.py`](configs/OmniScene/screen/long_s.py) = [`long_c0.py`](configs/OmniScene/screen/long_c0.py)
+(OneCycle with peak lr 5e-5, `prune_invisible`) + `lpips_input_range`, `sampling_align`, `ws_loss` and the fused depth
+weight 0.1. [`scripts/long_arm.sh`](scripts/long_arm.sh) trains it, evaluates every saved checkpoint on the validation
+split, picks one there (`tools/select_checkpoint.py`), reads test once for it and counts its rendered Gaussians:
+
+```bash
+CYLINDERSPLAT_S3=/path/to/checkpoints/mp3d_stage3_joint_256x512 CYLINDERSPLAT_RUNS_ROOT=$RUNS \
+CYLINDERSPLAT_RELEASED_VAL=<the released checkpoint's mp3d_double_256_val --novel-only metrics.json> \
+    bash scripts/long_arm.sh long_s 0          # config name, GPU
+```
+
+Novel views (`--novel-only`), one run (seed 1111), WS-PSNR / LPIPS; `long_c0` is the same schedule with
+`prune_invisible` only (no `lpips_input_range`, `sampling_align`, `ws_loss`, and the default fused depth weight):
+
+| model | val 1.0 m | M3D 2.0 m | M3D 1.5 m | M3D 1.0 m | Replica | Residential |
+|---|---|---|---|---|---|---|
+| released stage 3 | 25.04 / 0.124 | 19.39 / 0.343 | 22.51 / 0.215 | 26.82 / 0.103 | 29.03 / 0.074 | 26.88 / 0.180 |
+| `long_c0` (20k steps) | 24.94 / 0.127 | 19.63 / 0.338 | 22.61 / 0.209 | 26.79 / 0.107 | 28.90 / 0.082 | 26.92 / 0.182 |
+| `long_s` (LS, 20k steps) | 25.25 / 0.118 | 19.71 / 0.323 | 22.77 / 0.191 | 27.01 / 0.101 | 29.43 / 0.069 | 26.89 / 0.183 |
+
+The test sets have 10 samples per MP3D baseline, so the 2.0 m column is noisy (in our runs it moved by up to 0.6 dB
+between nearby checkpoints of one recipe): read it together with the validation column.
+The LS checkpoint is not part of the release.
 
 ### 360Loc fine-tune
 
@@ -357,8 +391,9 @@ metrics), `--fast-ssim` (adds a GPU SSIM column).
 | `configs/OmniScene/` | model configs; `release/` holds the recipes of the released checkpoints |
 | `configs/accelerate/` | launch configs for 1, 2 and 3 processes |
 | `model/`, `data/`, `builder/` | models, loaders, model registry |
-| `tools/` | switches, checkpoint loading rules, metrics, the depth-prior tool |
+| `tools/` | switches, checkpoint loading rules, metrics, the depth-prior tool; the fine-tune decision tools (`select_checkpoint`, `decision_metrics`, `count_rendered_gaussians`, `diagnose_gaussians`) |
 | `scripts/reproduce.sh` | download, check and evaluate the released checkpoints |
+| `scripts/long_arm.sh` | one fine-tune run of the `mp3d_double_256_screen` row: train, evaluate, select, read test once, count |
 | `pano_gaussian/`, `simple-knn/` | CUDA extensions (glm is a submodule) |
 | `tests/` | CPU tests: `CUDA_VISIBLE_DEVICES= python -m pytest tests/` |
 
