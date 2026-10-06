@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One fine-tune run on one GPU: configs/OmniScene/screen/<ARM>.py (ARM = long_ + letters / digits / _; row
+# One fine-tune run on one GPU: configs/OmniScene/screen/<ARM>.py (ARM = long_ or s3k_ + letters / digits / _; row
 # mp3d_double_256_screen) trained from a checkpoint, then every saved checkpoint evaluated on mp3d_double_256_val (all
 # targets and --novel-only), one checkpoint chosen on val by tools/select_checkpoint.py (--fallback best by default),
 # and only that checkpoint evaluated on mp3d_double_256 (all targets and --novel-only) and its rendered Gaussians
@@ -18,12 +18,16 @@
 # released only), with --fallback $CYLINDERSPLAT_SELECT_FALLBACK (default best). The last line printed is
 # `selected <step> <reason>` (reason vtol or fallback, see select_checkpoint.py). The open-file limit is raised (the 32
 # loader workers need more than 1024 descriptors). With CYLINDERSPLAT_ALLOWED_GPUS set (e.g. "1 2 3"), GPU must be one
-# of them. Exit codes: 2 bad arguments or environment (checked before training); 3 test is read once: the run holds a
-# test record of another step, or the new selection is null after test was read (selection.json is left unchanged); 4
-# the run directory exists without the final checkpoint (a stopped or a concurrent run; move it aside by hand); 5 a
-# CYLINDERSPLAT_EVAL_STEPS step has no checkpoint, or the selection named no saved step; 6 no step within V-tol with
-# fallback none (the last line is `selected none none`; no test record and no count are written), and every later run
-# of an arm whose selection.json records that null choice; any other code is the training's.
+# of them. An s3k_* arm (README, "Volume sparsity") needs CYLINDERSPLAT_INIT and CYLINDERSPLAT_STEPS, and the base
+# configs s3k_base / s3k_sp3d are refused. Exit codes: 2 bad arguments or environment (checked before training); 3 test
+# is read once: the run holds a test record of another step, or the new selection is null after test was read
+# (selection.json is left unchanged); 4 the run directory exists without the final checkpoint (a stopped or a concurrent
+# run; move it aside by hand); 5 a CYLINDERSPLAT_EVAL_STEPS step has no checkpoint, or the selection named no saved
+# step; 6 no step within V-tol with fallback none (the last line is `selected none none`; no test record and no count
+# are written), and every later run of an arm whose selection.json records that null choice; 7 the run was stopped by
+# train.py's SparsityMonitor (switch volume_sparsity: it writes $RUN/arm_failed.json; the last line is `arm failed:
+# <marker>`, nothing is evaluated, selected, read or counted), and every later run of an arm holding that marker; any
+# other code is the training's.
 #
 # Optional overrides (unset = the behaviour above): CYLINDERSPLAT_INIT (the checkpoint directory training starts from
 # instead of CYLINDERSPLAT_S3, which is then not needed), CYLINDERSPLAT_STEPS (training steps, default 20000),
@@ -58,11 +62,22 @@ CONFIG=configs/OmniScene/screen/$ARM.py
 RUN=$CYLINDERSPLAT_RUNS_ROOT/$ARM
 cd "$REPO"
 # one path segment: the arm names both the config and the run directory under the runs root
-[[ $ARM =~ ^long_[A-Za-z0-9_]+$ ]] || { echo "not a long config: $ARM" >&2; exit 2; }
+[[ $ARM =~ ^(long|s3k)_[A-Za-z0-9_]+$ ]] || { echo "not a long config: $ARM" >&2; exit 2; }
 [ -f "$CONFIG" ] || { echo "no config $CONFIG" >&2; exit 2; }
+case $ARM in
+    s3k_base | s3k_sp3d) echo "$ARM is a base config: train s3k_ls or s3k_ls_sp3" >&2; exit 2 ;;
+    s3k_*) [ -n "${CYLINDERSPLAT_INIT:-}" ] && [ -n "${CYLINDERSPLAT_STEPS:-}" ] \
+               || { echo "$ARM fine-tunes LS: set CYLINDERSPLAT_INIT and CYLINDERSPLAT_STEPS" >&2; exit 2; } ;;
+esac
 if [ -n "${CYLINDERSPLAT_ALLOWED_GPUS:-}" ]; then
     case " $CYLINDERSPLAT_ALLOWED_GPUS " in *" $GPU "*) ;; *) echo "GPU $GPU not in $CYLINDERSPLAT_ALLOWED_GPUS" >&2; exit 2 ;; esac
 fi
+failed_marker=$RUN/arm_failed.json
+arm_failed() {
+    echo "arm failed: $(tr -s '[:space:]' ' ' < "$failed_marker" | cut -c1-500)"
+    exit 7
+}
+if [ -f "$failed_marker" ]; then arm_failed; fi  # a stopped arm is never re-entered or evaluated
 # a null selection is final: a re-run with another fallback or reference list must not choose a step and read test
 if [ -f "$RUN/selection.json" ] && grep -q '"chosen": null' "$RUN/selection.json"; then
     echo "null choice recorded in $RUN/selection.json" >&2
@@ -85,9 +100,13 @@ if [ "$hard" = unlimited ] || [ "$hard" -ge 65536 ]; then ulimit -n 65536; else 
 
 if [ ! -f "$RUN/checkpoint-$STEPS/model.safetensors" ]; then
     mkdir "$RUN" 2>/dev/null || { echo "$RUN exists without checkpoint-$STEPS: a stopped or running run" >&2; exit 4; }
+    rc=0
     "$PYTHON" -m accelerate.commands.launch --config-file configs/accelerate/accel_1proc.yaml --gpu_ids "$GPU" \
         train.py --entry mp3d_double_256_screen --py-config "$CONFIG" --run-id "$ARM" \
-        --resume-from "$INIT" --transfer "$TRANSFER" --max-steps "$STEPS" --save-final
+        --resume-from "$INIT" --transfer "$TRANSFER" --max-steps "$STEPS" --save-final || rc=$?
+    # accelerate's launcher reports any train.py failure as exit 1, so a stopped arm is known by its marker
+    if [ -f "$failed_marker" ]; then arm_failed; fi
+    [ "$rc" -eq 0 ] || exit "$rc"
 fi
 
 candidates=()

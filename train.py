@@ -231,6 +231,50 @@ def describe_entry(entry):
     return f"trains on {entry['loader']['dataset_class']} from {entry['loader']['module']}"
 
 
+class SparsityMonitor:
+    """Stop rules of the volume sparsity budget (switch volume_sparsity, model/volume/sparsity.py) with the model's
+    sparsity_args: a non-finite loss, or - when collapse_floor is set - from collapse_from on, a trailing
+    collapse_window-step mean of the rendered volume share below collapse_floor x the trailing mean of its target
+    (pruning that runs away from the budget). A failed arm writes <work dir>/arm_failed.json and exits with code 7
+    before any further save (scripts/long_arm.sh then skips every evaluation and the test read). Inactive without the
+    switch; with it, a run whose config sets no budget_start, or that runs on more than one process (a stop on one rank
+    would leave the others waiting in the gradient all-reduce), is refused before the first step."""
+
+    def __init__(self, model, work_dir, num_processes=1):
+        self.active = bool(getattr(model, "volume_sparsity", False))
+        self.args = dict(getattr(model, "sparsity_args", {}) or {})
+        if self.active and num_processes != 1:
+            raise SystemExit("volume_sparsity runs on one process (row mp3d_double_256_screen), "
+                             f"not {num_processes}")
+        if self.active and self.args.get("budget_start") is None:
+            raise SystemExit("volume_sparsity: sparsity_args.budget_start is not set (the ceiling of the init's rendered "
+                             "volume share; e.g. train s3k_ls_sp3.py, not its base s3k_sp3d.py)")
+        self.work_dir = work_dir
+        self.trail = []
+
+    def fail(self, step, reason, **details):
+        with open(osp.join(self.work_dir, "arm_failed.json"), "w") as f:
+            json.dump(dict(step=step, reason=reason, **details), f, indent=2)
+        print(f"volume sparsity: arm failed at step {step}: {reason}", flush=True)
+        sys.exit(7)
+
+    def check(self, step, loss, log):
+        if not self.active:
+            return
+        if not torch.isfinite(loss.detach()).all():
+            self.fail(step, "non-finite loss")
+        floor = self.args.get("collapse_floor")
+        if floor is None:
+            return
+        window = self.args.get("collapse_window", 100)
+        self.trail = (self.trail + [(log["train/volume_share"], log["train/volume_share_target"])])[-window:]
+        if step >= self.args.get("collapse_from", 1000) and len(self.trail) == window:
+            share = sum(b for b, _ in self.trail) / window
+            target = sum(r for _, r in self.trail) / window
+            if share < floor * target:
+                self.fail(step, "volume share collapsed", mean_volume_share=share, mean_target=target, steps=window)
+
+
 def save_checkpoint(accelerator, work_dir, global_iter, logger):
     save_file_name = osp.join(osp.abspath(work_dir), f"checkpoint-{global_iter}")
     accelerator.save_state(save_file_name)
@@ -367,6 +411,8 @@ def main(args, entry, loader_module):
 
     epoch = 0
     global_iter = 0
+    unwrapped = my_model.module if hasattr(my_model, "module") else my_model  # the DDP wrapper keeps it in .module
+    sparsity_monitor = SparsityMonitor(unwrapped, args.work_dir, accelerator.num_processes)
 
     print("work dir: ", args.work_dir)
 
@@ -407,6 +453,7 @@ def main(args, entry, loader_module):
                         batch, "train", iter=global_iter, iter_end=cfg.max_train_steps
                     )
 
+                sparsity_monitor.check(global_iter, loss, log)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:

@@ -51,6 +51,7 @@ TRAIN_ONLY_SWITCHES = (
     "depth_valid_mask",
     "lpips_input_range",
     "ws_loss",
+    "volume_sparsity",
 )
 
 

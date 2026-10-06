@@ -21,6 +21,7 @@ TABLE = {
     "sampling_align": (False, ["model.pixel_gs.sampling_align", "model.volume_gs.gs_decoder.sampling_align"]),
     "ws_loss": (False, ["model.ws_loss"]),
     "prune_invisible": (False, ["model.camera_args.prune_invisible"]),
+    "volume_sparsity": (False, ["model.volume_sparsity"]),
 }
 # The nested model nodes the switch paths above write into.
 SUBMODULES = dict(pixel_gs={}, volume_gs=dict(gs_decoder={}), camera_args={})

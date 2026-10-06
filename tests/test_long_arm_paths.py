@@ -1,6 +1,7 @@
 """scripts/long_arm.sh with a stub PYTHON (no GPU, dataset or checkpoint): the selection references and fallback from
 the environment, a null selection (exit 6, test not read), test read once (exit 3), a claimed run directory (exit 4), a
-training failure, the argument checks (exit 2) and the opt-in overrides CYLINDERSPLAT_INIT / STEPS / EVAL_STEPS."""
+run stopped by the sparsity monitor (exit 7, nothing evaluated), a training failure, the argument checks (exit 2) and
+the opt-in overrides CYLINDERSPLAT_INIT / STEPS / EVAL_STEPS."""
 
 import json
 import os
@@ -15,7 +16,7 @@ from tests.conftest import REPO_ROOT
 BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash")
 
-ARM = "long_c0"  # an existing long config; the script refuses any other name
+ARM = "long_c0"  # an existing long config; the script refuses names other than long_* / s3k_* configs
 
 # Stands in for `python` in long_arm.sh: logs its argv (one JSON list per line) and emulates train.py (through the
 # accelerate launcher), evaluate.py, tools/select_checkpoint.py and tools/count_rendered_gaussians.py.
@@ -35,7 +36,12 @@ def opt(name):
 
 if argv[:2] == ["-m", "accelerate.commands.launch"]:
     run = os.path.join(os.environ["CYLINDERSPLAT_RUNS_ROOT"], opt("--run-id"))
-    if os.environ["STUB_TRAIN"] == "crash":
+    mode = os.environ["STUB_TRAIN"]
+    if mode == "stopped":  # train.py writes the marker and exits 7; accelerate's launcher reports that as 1
+        with open(os.path.join(run, "arm_failed.json"), "w") as f:
+            json.dump(dict(reason="volume share collapsed", step=6000), f, indent=2)
+        sys.exit(1)
+    if mode == "crash":
         sys.exit(1)
     final = int(opt("--max-steps"))
     for step in sorted({min(5000, final), final}):
@@ -139,9 +145,30 @@ def test_a_null_selection_reads_no_test_and_counts_nothing(tmp_path):
     assert not any(c[0] == "tools/count_rendered_gaussians.py" for c in calls)
 
 
-def test_a_training_failure_keeps_its_exit_code(tmp_path):
+def test_a_stopped_arm_exits_7_without_any_evaluation(tmp_path):
+    proc, calls, run = long_arm(tmp_path, train="stopped")
+    assert proc.returncode == 7, proc.stderr
+    assert proc.stdout.splitlines()[-1].startswith("arm failed: ") and "volume share collapsed" in proc.stdout
+    assert [c[:2] for c in calls] == [["-m", "accelerate.commands.launch"]]
+    assert entries(run, "eval_*") == [] and not (run / "selection.json").exists() and entries(run, "count_*") == []
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_a_run_holding_the_marker_is_never_reentered(tmp_path, complete):
+    run = tmp_path / "runs" / ARM
+    run.mkdir(parents=True)
+    (run / "arm_failed.json").write_text(json.dumps(dict(reason="non-finite loss", step=4321)))
+    if complete:  # even with the final checkpoint present, nothing is evaluated
+        (run / "checkpoint-20000").mkdir()
+        (run / "checkpoint-20000" / "model.safetensors").write_text("")
+    proc, calls, _ = long_arm(tmp_path)
+    assert proc.returncode == 7 and "non-finite loss" in proc.stdout
+    assert calls == [] and entries(run, "eval_*") == []
+
+
+def test_a_training_failure_without_the_marker_keeps_its_exit_code(tmp_path):
     proc, calls, run = long_arm(tmp_path, train="crash")
-    assert proc.returncode == 1
+    assert proc.returncode == 1 and "arm failed" not in proc.stdout
     assert len(calls) == 1 and entries(run, "eval_*") == []
 
 
@@ -211,7 +238,7 @@ def test_without_init_or_s3_the_script_refuses(tmp_path):
 
 
 @pytest.mark.parametrize("arm", ["stage3_screen", "other_arm", "long_../../release/stage3_all_256", "long_c0/x",
-                                 "long_", "long_c0.py"])
+                                 "long_", "long_c0.py", "s3k_../long_s", "s4k_ls"])
 def test_non_long_configs_are_refused(tmp_path, arm):
     proc, calls, _ = long_arm(tmp_path, arm=arm)
     assert proc.returncode == 2 and "not a long config" in proc.stderr and calls == []
@@ -247,3 +274,27 @@ def test_a_named_transfer_reaches_train_py(tmp_path):
     proc, calls, _ = long_arm(tmp_path, args=("--transfer", "stage2_to_stage3"))
     assert proc.returncode == 0, proc.stderr
     assert opt(train_call(calls), "--transfer") == "stage2_to_stage3"
+
+
+def test_a_sparsity_fine_tune_of_ls_runs_with_the_overrides(tmp_path):
+    init = tmp_path / "ls_ckpt"
+    proc, calls, run = long_arm(tmp_path, select="8000 vtol", arm="s3k_ls_sp3", drop_s3=True,
+                                CYLINDERSPLAT_INIT=str(init), CYLINDERSPLAT_STEPS="8000",
+                                CYLINDERSPLAT_EVAL_STEPS="8000")
+    assert proc.returncode == 0, proc.stderr
+    call = train_call(calls)
+    assert opt(call, "--py-config") == "configs/OmniScene/screen/s3k_ls_sp3.py" and opt(call, "--max-steps") == "8000"
+    assert opt(call, "--resume-from") == str(init) and opt(count_call(calls), "--py-config") == opt(call, "--py-config")
+
+
+@pytest.mark.parametrize("env", [dict(), dict(CYLINDERSPLAT_INIT="ls_ckpt"), dict(CYLINDERSPLAT_STEPS="8000")])
+def test_a_sparsity_fine_tune_needs_its_init_and_steps(tmp_path, env):
+    proc, calls, run = long_arm(tmp_path, arm="s3k_ls_sp3", **env)
+    assert proc.returncode == 2 and "set CYLINDERSPLAT_INIT and CYLINDERSPLAT_STEPS" in proc.stderr
+    assert calls == [] and not run.exists()
+
+
+@pytest.mark.parametrize("arm", ["s3k_base", "s3k_sp3d"])
+def test_the_sparsity_base_configs_are_refused(tmp_path, arm):
+    proc, calls, run = long_arm(tmp_path, arm=arm, CYLINDERSPLAT_INIT="ls_ckpt", CYLINDERSPLAT_STEPS="8000")
+    assert proc.returncode == 2 and "is a base config" in proc.stderr and calls == [] and not run.exists()

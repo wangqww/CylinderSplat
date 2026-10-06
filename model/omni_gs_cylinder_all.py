@@ -11,13 +11,14 @@ from .gaussian import GaussianRenderer
 from .losses import LPIPS
 from .utils.image import maybe_resize
 from .utils.benchmarker import Benchmarker
+from .volume.sparsity import VolumeSparsityMixin
 
 
 from sample_anchors import transform_points
 
 
 @MODELS.register_module()
-class OmniGaussianCylinderAll(BaseModule):
+class OmniGaussianCylinderAll(VolumeSparsityMixin, BaseModule):
     def __init__(
         self,
         backbone=None,
@@ -31,6 +32,8 @@ class OmniGaussianCylinderAll(BaseModule):
         point_cloud_range=None,
         lpips_input_range=False,
         ws_loss=False,
+        volume_sparsity=False,
+        sparsity_args=None,
         **kwargs,
     ):
         """
@@ -38,6 +41,9 @@ class OmniGaussianCylinderAll(BaseModule):
             expects; the released runs fed [0, 1].
         ws_loss: latitude weights (the WS-PSNR weights, sin of the polar angle per row) on the fused L2 and on
             both perceptual terms; loss_recon is still logged as the unweighted mean.
+        volume_sparsity: a one-sided budget on the share of rendered volume Gaussians (opacity >= 1/255), carried
+            by their opacity logits (model/volume/sparsity.py volume_sparsity_budget; training loss only, the forward
+            is unchanged). sparsity_args overrides SPARSITY_DEFAULTS.
         """
 
         super().__init__()
@@ -45,6 +51,7 @@ class OmniGaussianCylinderAll(BaseModule):
         self.use_checkpoint = use_checkpoint
         self.lpips_input_range = lpips_input_range
         self.ws_loss = ws_loss
+        self._init_volume_sparsity(volume_sparsity, sparsity_args)
 
         self.backbone = MODELS.build(backbone)
         self.pixel_gs = MODELS.build(pixel_gs)
@@ -262,6 +269,7 @@ class OmniGaussianCylinderAll(BaseModule):
             data_dict["img_metas"],
         )
 
+        budget_loss, sparsity_stats = self._apply_sparsity(gaussians_volume, split, iter)  # (None, {}) when off
         new_gaussian_points = transform_points(
             gaussians_volume[..., :3], rearrange(data_dict["c2ws"], "b v h w -> (b v) h w")
         )
@@ -434,6 +442,13 @@ class OmniGaussianCylinderAll(BaseModule):
             ).mean()
             loss = loss + self.loss_args.weight_volume_loss * volume_loss
             set_loss("volume", split, volume_loss, self.loss_args.weight_volume_loss)
+
+        # ================ Volume sparsity budget ================ #
+        if budget_loss is not None:  # training split only
+            loss = loss + budget_loss
+            set_loss("budget", split, budget_loss.detach())
+        for key, value in sparsity_stats.items():
+            loss_terms[f"{split}/{key}"] = value
 
         return (
             loss,

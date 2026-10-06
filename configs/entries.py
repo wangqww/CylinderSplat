@@ -250,13 +250,18 @@ ENTRIES = {
 # at --max-steps with --save-final), no in-run validation (runs are evaluated with
 # evaluate.py). long_s = the LS recipe (20,000 steps from the released stage 3;
 # README, "LS fine-tune"), long_c0 = the same schedule with prune_invisible only (no lpips_input_range,
-# sampling_align, ws_loss, and the default fused depth weight).
+# sampling_align, ws_loss, and the default fused depth weight); s3k_* = 8,000-step fine-tunes of LS with and without
+# the volume sparsity budget (README, "Volume sparsity").
 # ---------------------------------------------------------------------------
 ENTRIES["mp3d_double_256_screen"] = dict(
     configs=[
         "configs/OmniScene/screen/stage3_screen.py",
         "configs/OmniScene/screen/long_c0.py",
         "configs/OmniScene/screen/long_s.py",
+        "configs/OmniScene/screen/s3k_base.py",
+        "configs/OmniScene/screen/s3k_ls.py",
+        "configs/OmniScene/screen/s3k_sp3d.py",
+        "configs/OmniScene/screen/s3k_ls_sp3.py",
     ],
     loader=ENTRIES["mp3d_double_256"]["loader"],
     batch_size=ENTRIES["mp3d_double_256"]["batch_size"],

@@ -44,6 +44,10 @@ SWITCHES = {
     # Drop Gaussians with opacity < 1/255 before rasterising (the rasteriser never blends them; renders unchanged).
     "prune_invisible": (
         False, bool, ["model.camera_args.prune_invisible"], "model: skip Gaussians the rasteriser never blends"),
+    # A one-sided budget on the share of rendered volume Gaussians, carried by their opacity logits (loss only).
+    "volume_sparsity": (
+        False, bool, ["model.volume_sparsity"],
+        "train: one-sided budget on the rendered volume share, carried by the opacity logits"),
 }
 
 _TRUE = ("1", "true", "yes", "on")
