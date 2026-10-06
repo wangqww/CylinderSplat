@@ -210,7 +210,8 @@ def test_without_init_or_s3_the_script_refuses(tmp_path):
     assert proc.returncode == 2 and "CYLINDERSPLAT_S3" in proc.stderr and calls == []
 
 
-@pytest.mark.parametrize("arm", ["stage3_screen", "other_arm"])
+@pytest.mark.parametrize("arm", ["stage3_screen", "other_arm", "long_../../release/stage3_all_256", "long_c0/x",
+                                 "long_", "long_c0.py"])
 def test_non_long_configs_are_refused(tmp_path, arm):
     proc, calls, _ = long_arm(tmp_path, arm=arm)
     assert proc.returncode == 2 and "not a long config" in proc.stderr and calls == []

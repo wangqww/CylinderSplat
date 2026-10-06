@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One fine-tune run on one GPU: configs/OmniScene/screen/<ARM>.py (ARM = long_*; row
+# One fine-tune run on one GPU: configs/OmniScene/screen/<ARM>.py (ARM = long_ + letters / digits / _; row
 # mp3d_double_256_screen) trained from a checkpoint, then every saved checkpoint evaluated on mp3d_double_256_val (all
 # targets and --novel-only), one checkpoint chosen on val by tools/select_checkpoint.py (--fallback best by default),
 # and only that checkpoint evaluated on mp3d_double_256 (all targets and --novel-only) and its rendered Gaussians
@@ -57,7 +57,8 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIG=configs/OmniScene/screen/$ARM.py
 RUN=$CYLINDERSPLAT_RUNS_ROOT/$ARM
 cd "$REPO"
-case $ARM in long_*) ;; *) echo "not a long config: $ARM" >&2; exit 2 ;; esac
+# one path segment: the arm names both the config and the run directory under the runs root
+[[ $ARM =~ ^long_[A-Za-z0-9_]+$ ]] || { echo "not a long config: $ARM" >&2; exit 2; }
 [ -f "$CONFIG" ] || { echo "no config $CONFIG" >&2; exit 2; }
 if [ -n "${CYLINDERSPLAT_ALLOWED_GPUS:-}" ]; then
     case " $CYLINDERSPLAT_ALLOWED_GPUS " in *" $GPU "*) ;; *) echo "GPU $GPU not in $CYLINDERSPLAT_ALLOWED_GPUS" >&2; exit 2 ;; esac
