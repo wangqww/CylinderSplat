@@ -37,3 +37,6 @@ hf_data/
 
 # Run outputs (training/evaluation write under a run directory outside the repo)
 runs/
+
+# Local review records of the coding agents (never committed)
+.claude-implement/
